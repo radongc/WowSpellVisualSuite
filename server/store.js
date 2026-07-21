@@ -85,6 +85,66 @@ class Store {
     return rec;
   }
 
+  // Deep-clone a SpellVisual: the visual record itself, every kit it references,
+  // and (optionally) every effect those kits/the visual reference. All internal
+  // references are rewired to the new IDs. Returns an old->new ID map per table.
+  cloneVisualChain(visualId, { cloneEffects = true, spellId = null, spellSlot = 0 } = {}) {
+    const visuals = this.tables.SpellVisual;
+    const kits = this.tables.SpellVisualKit;
+    if (!visuals || !kits) throw new Error('SpellVisual / SpellVisualKit not loaded');
+    if (!visuals.byId.has(visualId)) throw new Error(`SpellVisual #${visualId} not found`);
+
+    const KIT_FIELDS = ['PrecastKit', 'CastKit', 'ImpactKit', 'StateKit', 'ChannelKit', 'AreaKit'];
+    const KIT_EFFECT_FIELDS = ['HeadEffect', 'ChestEffect', 'BaseEffect', 'LeftHandEffect', 'RightHandEffect', 'BreathEffect', 'WorldEffect'];
+    const VISUAL_EFFECT_FIELDS = ['MissileModel', 'AreaModel'];
+
+    const effectMap = new Map();
+    const cloneEffect = (oldId) => {
+      if (oldId == null || oldId <= 0) return oldId;
+      if (effectMap.has(oldId)) return effectMap.get(oldId);
+      const src = this.tables.SpellVisualEffectName && this.tables.SpellVisualEffectName.byId.get(oldId);
+      if (!src) return oldId; // dangling ref — keep as-is
+      const rec = this.createRecord('SpellVisualEffectName', { cloneFrom: oldId });
+      rec.Name = (src.Name || 'effect') + ' (copy)';
+      effectMap.set(oldId, rec.ID);
+      return rec.ID;
+    };
+
+    const kitMap = new Map();
+    const cloneKit = (oldId) => {
+      if (oldId == null || oldId <= 0) return oldId;
+      if (kitMap.has(oldId)) return kitMap.get(oldId);
+      if (!kits.byId.has(oldId)) return oldId; // dangling ref — keep as-is
+      const rec = this.createRecord('SpellVisualKit', { cloneFrom: oldId });
+      kitMap.set(oldId, rec.ID);
+      if (cloneEffects) {
+        for (const f of KIT_EFFECT_FIELDS) rec[f] = rec[f] > 0 ? cloneEffect(rec[f]) : rec[f];
+        rec.SpecialEffect = rec.SpecialEffect.map((e) => (e > 0 ? cloneEffect(e) : e));
+      }
+      return rec.ID;
+    };
+
+    const newVisual = this.createRecord('SpellVisual', { cloneFrom: visualId });
+    for (const f of KIT_FIELDS) newVisual[f] = newVisual[f] > 0 ? cloneKit(newVisual[f]) : newVisual[f];
+    if (cloneEffects) {
+      for (const f of VISUAL_EFFECT_FIELDS) newVisual[f] = newVisual[f] > 0 ? cloneEffect(newVisual[f]) : newVisual[f];
+    }
+
+    if (spellId != null) {
+      const spells = this.tables.Spell;
+      if (!spells || !spells.byId.has(spellId)) throw new Error(`Spell #${spellId} not found`);
+      const spell = spells.byId.get(spellId);
+      spell.SpellVisualID[spellSlot === 1 ? 1 : 0] = newVisual.ID;
+      spells.dirty = true;
+    }
+
+    return {
+      visual: { [visualId]: newVisual.ID },
+      kits: Object.fromEntries(kitMap),
+      effects: Object.fromEntries(effectMap),
+    };
+  }
+
   deleteRecord(name, id) {
     const t = this.tables[name];
     if (!t) throw new Error(`table ${name} not loaded`);

@@ -46,7 +46,8 @@ button:disabled { opacity: .45; cursor: default; }
 button.primary { background: #47391a; border-color: var(--accent); color: var(--accent); }
 button.danger:hover:not(:disabled) { border-color: var(--danger); color: var(--danger); }
 
-#layout { flex: 1; display: grid; grid-template-columns: 320px 1fr 380px; min-height: 0; }
+:root { --preview-w: 380px; }
+#layout { flex: 1; display: grid; grid-template-columns: 320px 1fr var(--preview-w); min-height: 0; }
 
 /* sidebar */
 #sidebar { display: flex; flex-direction: column; background: var(--bg2); border-right: 1px solid var(--border); min-height: 0; }
@@ -146,7 +147,12 @@ details.adv > summary { cursor: pointer; color: var(--muted); font-size: 12px; p
 .linkbtn:hover { text-decoration: underline; border: none; }
 
 /* preview */
-#preview { display: flex; flex-direction: column; background: var(--bg2); border-left: 1px solid var(--border); min-height: 0; }
+#preview { display: flex; flex-direction: column; background: var(--bg2); border-left: 1px solid var(--border); min-height: 0; position: relative; }
+#preview-resizer {
+  position: absolute; left: -4px; top: 0; bottom: 0; width: 8px;
+  cursor: col-resize; z-index: 10;
+}
+#preview-resizer:hover, #preview-resizer.active { background: var(--accent2); opacity: .35; }
 .preview-head { display: flex; justify-content: space-between; padding: 8px 12px; font-size: 12px; color: var(--muted); border-bottom: 1px solid var(--border); }
 #preview-title { color: var(--text); overflow-wrap: anywhere; }
 .canvas-wrap { flex: 1; position: relative; min-height: 0; display: flex; }
@@ -159,7 +165,7 @@ details.adv > summary { cursor: pointer; color: var(--muted); font-size: 12px; p
 .preview-overlay b { color: var(--text); }
 .preview-overlay code { font-family: var(--mono); font-size: 12px; color: var(--accent2); overflow-wrap: anywhere; }
 .preview-msg { padding: 10px 14px; font-size: 12px; color: var(--muted); border-top: 1px solid var(--border); min-height: 40px; overflow-wrap: anywhere; }
-.preview-foot { display: flex; gap: 16px; padding: 6px 12px; font-size: 12px; color: var(--muted); border-top: 1px solid var(--border); }
+.preview-foot { display: flex; flex-wrap: wrap; gap: 8px 16px; padding: 6px 12px; font-size: 12px; color: var(--muted); border-top: 1px solid var(--border); }
 .preview-foot label { display: flex; align-items: center; gap: 5px; }
 
 #toast {

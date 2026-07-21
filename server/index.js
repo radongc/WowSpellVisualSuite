@@ -6,7 +6,9 @@ const path = require('path');
 const { Store, DBC_DIR } = require('./store');
 const { SCHEMAS } = require('./schemas');
 const { parseM2 } = require('./m2');
+const { bakeM2 } = require('./m2bake');
 const { decodeBLP } = require('./blp');
+const { buildMpq } = require('./mpqwrite');
 const mpq = require('./mpq');
 
 const PORT = Number(process.env.PORT) || 3414;
@@ -151,6 +153,19 @@ route('GET', /^\/api\/spells$/, (req, res, m, url) => {
   sendJson(res, 200, { total: matches.length, offset, records: page });
 });
 
+// Deep-clone a spell visual chain: visual + kits (+ effects), all rewired.
+route('POST', /^\/api\/clone-visual-chain$/, async (req, res) => {
+  const body = await readBody(req);
+  const visualId = Number(body.visualId);
+  if (!visualId) return sendJson(res, 400, { error: 'visualId required' });
+  const result = store.cloneVisualChain(visualId, {
+    cloneEffects: body.cloneEffects !== false,
+    spellId: body.spellId != null ? Number(body.spellId) : null,
+    spellSlot: Number(body.spellSlot) || 0,
+  });
+  sendJson(res, 200, result);
+});
+
 route('POST', /^\/api\/save$/, (req, res) => {
   const result = store.save();
   sendJson(res, 200, result);
@@ -206,6 +221,78 @@ route('GET', /^\/api\/model$/, (req, res, m, url) => {
     });
   }
   sendJson(res, 404, { error: `model not found in ${archives.length} archive(s) or loose files: ${vpath}`, archives });
+});
+
+// Read any game file: loose file under gamedata first, then the MPQ chain.
+function readGameFile(vpath) {
+  const clean = String(vpath).replace(/\\/g, '/').replace(/^\/+/, '');
+  if (clean.includes('..')) return null;
+  const loose = path.join(GAMEDATA_DIR, clean);
+  if (fs.existsSync(loose) && fs.statSync(loose).isFile()) {
+    return { source: 'loose', data: fs.readFileSync(loose) };
+  }
+  const hit = mpq.readFile(vpath);
+  return hit ? { source: hit.archive, data: hit.data } : null;
+}
+
+// Bake a transform into a copy of an M2 and write it as a loose file under
+// gamedata/ (from where the editor resolves it immediately; pack it into a
+// patch MPQ for the client via /api/export-patch).
+route('POST', /^\/api\/bake-m2$/, async (req, res) => {
+  const body = await readBody(req);
+  const { sourcePath, outPath } = body;
+  if (!sourcePath || !outPath) return sendJson(res, 400, { error: 'sourcePath and outPath required' });
+  const cleanOut = String(outPath).replace(/\//g, '\\').replace(/^\\+/, '');
+  if (cleanOut.includes('..') || !/\.m2$/i.test(cleanOut)) {
+    return sendJson(res, 400, { error: 'outPath must be a relative path ending in .m2' });
+  }
+  // resolve source with model extension fallbacks
+  const base = String(sourcePath).replace(/\.(mdx|mdl|m2)$/i, '');
+  let src = null;
+  for (const ext of ['.m2', '.mdx', '.mdl']) {
+    src = readGameFile(base + ext);
+    if (src) break;
+  }
+  if (!src) return sendJson(res, 404, { error: `source model not found: ${sourcePath}` });
+  const baked = bakeM2(src.data, {
+    offset: (body.offset || [0, 0, 0]).map(Number),
+    yaw: Number(body.yaw) || 0,
+    pitch: Number(body.pitch) || 0,
+    roll: Number(body.roll) || 0,
+    scale: Number(body.scale) || 1,
+  });
+  const outFile = path.join(GAMEDATA_DIR, cleanOut.replace(/\\/g, '/'));
+  fs.mkdirSync(path.dirname(outFile), { recursive: true });
+  fs.writeFileSync(outFile, baked);
+  sendJson(res, 200, { outPath: cleanOut, bytes: baked.length, source: src.source });
+});
+
+// Pack all loose files under gamedata/ (excluding .MPQ archives) into a fresh
+// patch archive the 1.12 client can load.
+route('GET', /^\/api\/export-patch$/, (req, res) => {
+  const files = [];
+  const walk = (dir, rel) => {
+    for (const entry of fs.readdirSync(dir)) {
+      const full = path.join(dir, entry);
+      const vname = rel ? `${rel}\\${entry}` : entry;
+      const st = fs.statSync(full);
+      if (st.isDirectory()) {
+        if (entry.toLowerCase() === 'data') continue; // nested archive dir
+        walk(full, vname);
+      } else if (!/\.mpq$/i.test(entry) && st.size < 100 * 1024 * 1024) {
+        files.push({ name: vname, data: fs.readFileSync(full) });
+      }
+    }
+  };
+  if (fs.existsSync(GAMEDATA_DIR)) walk(GAMEDATA_DIR, '');
+  if (!files.length) return sendJson(res, 404, { error: 'no loose files under gamedata to pack' });
+  const archive = buildMpq(files);
+  res.writeHead(200, {
+    'Content-Type': 'application/octet-stream',
+    'Content-Disposition': 'attachment; filename="patch-3.MPQ"',
+    'X-File-Count': String(files.length),
+  });
+  res.end(archive);
 });
 
 // Decoded BLP texture as raw RGBA bytes (dimensions in headers).

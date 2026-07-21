@@ -20,7 +20,16 @@ Then open **http://localhost:3414** (set `PORT` to change).
   - **SpellVisualKit** → animation, sound, camera shake, attached effects, character procs
   - **SpellVisualEffectName** → model name / file path / scale
 - Create, clone, and delete records; jump between references; see reverse usage.
+- **Deep-clone a whole visual chain** in one click (spell → visual → kits → effects, all
+  references rewired to the new copies) — no manual multi-table editing.
 - 3D preview of effect models (see *Game data* below).
+- **Attachment lab** (effect editor → "Position on character…"): preview any effect model
+  attached to a race/gender mannequin at a real attachment point, drag it into place
+  (shift+drag) or set XYZ/yaw/pitch/roll/scale, then **bake** the transform into a copy of
+  the M2. 1.12 has no offset fields in DBC — position lives in the model file (that's how
+  the WSG flag sits on the back while being a ChestEffect) — so the baked model is the
+  1.12-correct way to reposition a visual. "Download patch MPQ" packs every baked file
+  into a client-ready archive (with `(listfile)`).
 - Edits are applied to server memory as you type; **Save DBCs** writes the files to disk.
   Every save copies the originals to `dbc/backup/<timestamp>/` first.
 

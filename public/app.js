@@ -25,8 +25,19 @@ const PATH_TYPES = { 0: 'Straight', 1: 'Arc (low)', 2: 'Arc (high)' };
 const ATTACH_POINTS = {
   '-1': 'None', 0: 'Shield / Mount', 1: 'Hand Right', 2: 'Hand Left', 3: 'Elbow Right',
   4: 'Elbow Left', 5: 'Shoulder Right', 6: 'Shoulder Left', 7: 'Knee Right', 8: 'Knee Left',
-  11: 'Helm', 12: 'Back', 17: 'Breath', 19: 'Base', 20: 'Head',
+  9: 'Hip Right', 10: 'Hip Left', 11: 'Helm', 12: 'Back', 13: 'Shoulder Flap Right',
+  14: 'Shoulder Flap Left', 15: 'Chest Blood Front', 16: 'Chest Blood Back', 17: 'Breath',
+  18: 'Player Name', 19: 'Base', 20: 'Head', 21: 'Spell Left Hand', 22: 'Spell Right Hand',
+  23: 'Special 1', 24: 'Special 2', 25: 'Special 3', 26: 'Sheath Main Hand',
+  27: 'Sheath Off Hand', 28: 'Sheath Shield', 29: 'Player Name Mounted',
+  30: 'Large Weapon Left', 31: 'Large Weapon Right', 32: 'Hip Weapon Left',
+  33: 'Hip Weapon Right', 34: 'Chest', 35: 'Hand Arrow', 36: 'Bullet',
+  37: 'Spell Hand Omni', 38: 'Spell Hand Directed',
 };
+
+// Vanilla playable-race character models for the attachment lab mannequin.
+const CHAR_MODELS = ['Human', 'Orc', 'Dwarf', 'NightElf', 'Scourge', 'Tauren', 'Gnome', 'Troll']
+  .flatMap((r) => ['Male', 'Female'].map((g) => `Character\\${r}\\${g}\\${r}${g}.m2`));
 
 const KIT_SLOT_FIELDS = [
   ['HeadEffect', 'Head'], ['ChestEffect', 'Chest'], ['BaseEffect', 'Base'],
@@ -233,6 +244,10 @@ function select(type, id, crumbs) {
 
 function renderEditor() {
   const sel = state.selection;
+  if (lab && (!sel || sel.type !== 'effect' || sel.id !== lab.effect.ID)) {
+    lab = null;
+    Viewer.setLabDrag(null);
+  }
   const empty = $('#editor-empty');
   const content = $('#editor-content');
   if (!sel) { empty.hidden = false; content.hidden = true; return; }
@@ -412,7 +427,12 @@ async function renderSpellEditor(content, id) {
       el('h3', {}, 'Spell visuals'),
       el('div', { class: 'field-grid' },
         refField(spell, 'Spell', 'SpellVisualID', 'Visual 1', REFS.visual, { index: 0, after: () => renderEditor() }),
-        refField(spell, 'Spell', 'SpellVisualID', 'Visual 2', REFS.visual, { index: 1, after: () => renderEditor() }))));
+        refField(spell, 'Spell', 'SpellVisualID', 'Visual 2', REFS.visual, { index: 1, after: () => renderEditor() })),
+      spell.SpellVisualID[0] > 0 ? el('div', { style: 'margin-top:8px' },
+        el('button', {
+          title: 'Clone visual 1 with all its kits and effects, and point this spell at the new copy — ready to customize without touching the original',
+          onclick: () => cloneChain(spell.SpellVisualID[0], spell.ID, 0),
+        }, `Clone chain of visual #${spell.SpellVisualID[0]} → assign to this spell`)) : null));
 
   // inline visual chain for visual 1
   const vid = spell.SpellVisualID[0];
@@ -453,7 +473,11 @@ function renderVisualEditor(content, id) {
   if (!v) { content.append(el('div', { class: 'banner' }, `SpellVisual #${id} not found.`)); return; }
   content.append(el('div', { class: 'ed-head' },
     el('h2', {}, 'Spell Visual'),
-    el('span', { class: 'id-badge' }, `#${v.ID}`)));
+    el('span', { class: 'id-badge' }, `#${v.ID}`),
+    el('button', {
+      title: 'Clone this visual together with all its kits and effects, rewiring every reference to the new copies',
+      onclick: () => cloneChain(v.ID),
+    }, 'Deep clone chain')));
   const usedBy = el('div', { class: 'ed-sub' }, 'Looking up spells using this visual…');
   content.append(usedBy);
   api(`/api/spells?visual=${id}&limit=500`).then((page) => {
@@ -633,9 +657,22 @@ function soundLabel(id) {
 function renderEffectEditor(content, id) {
   const e = rec('SpellVisualEffectName', id);
   if (!e) { content.append(el('div', { class: 'banner' }, `SpellVisualEffectName #${id} not found.`)); return; }
+  if (lab && lab.effect !== e) { lab = null; Viewer.setLabDrag(null); }
   content.append(el('div', { class: 'ed-head' },
     el('h2', {}, e.Name || '(unnamed effect)'),
-    el('span', { class: 'id-badge' }, `#${e.ID}`)));
+    el('span', { class: 'id-badge' }, `#${e.ID}`),
+    lab ? null : el('button', {
+      title: 'Preview this model attached to a character and bake an XYZ/rotation/scale offset into a copy of the M2 (1.12 has no offset fields in DBC — position lives in the model file)',
+      onclick: () => openLab(e),
+    }, 'Position on character…')));
+
+  if (lab && lab.effect === e) {
+    content.append(el('div', { class: 'card' },
+      el('h3', {}, 'Attachment lab ', el('span', { class: 'hint' }, '(shift+drag in the preview moves the model)')),
+      el('div', { id: 'lab-status', class: 'ed-sub' }),
+      el('div', { id: 'lab-controls' })));
+    loadLabScene();
+  }
 
   // usage
   const usedKits = tbl('SpellVisualKit').filter((k) =>
@@ -656,7 +693,223 @@ function renderEffectEditor(content, id) {
       numField(e, 'SpellVisualEffectName', 'AreaEffectSize', 'Area effect size'),
       numField(e, 'SpellVisualEffectName', 'Scale', 'Scale', { float: true }))));
 
-  previewEffectId(id);
+  if (!lab) previewEffectId(id);
+}
+
+// ---------- deep clone ----------
+
+async function cloneChain(visualId, spellId, spellSlot) {
+  try {
+    const r = await api('/api/clone-visual-chain', {
+      method: 'POST',
+      body: { visualId, spellId, spellSlot },
+    });
+    await Promise.all([loadTable('SpellVisual'), loadTable('SpellVisualKit'), loadTable('SpellVisualEffectName')]);
+    buildDatalists();
+    refreshStatus();
+    const newId = r.visual[visualId];
+    const nKits = Object.keys(r.kits).length, nFx = Object.keys(r.effects).length;
+    toast(`Cloned visual #${visualId} → #${newId} (${nKits} kit${nKits === 1 ? '' : 's'}, ${nFx} effect${nFx === 1 ? '' : 's'})${spellId != null ? `, assigned to spell #${spellId}` : ''}`);
+    if (spellId != null) renderEditor();
+    else select('visual', newId);
+    renderList();
+  } catch (e) {
+    toast('Clone chain failed: ' + e.message, true);
+  }
+}
+
+// ---------- attachment lab ----------
+
+let lab = null; // { effect, charPath, charGeom, attachIdx, attachId, anchor, off, yaw, pitch, roll, scale }
+const charGeomCache = new Map();
+
+async function fetchModel(path) {
+  return api(`/api/model?path=${encodeURIComponent(path)}`);
+}
+
+// Which attachment the client uses for each kit slot (fallbacks for models
+// lacking the primary id).
+const SLOT_ANCHORS = {
+  HeadEffect: [11, 20], ChestEffect: [34, 15], BaseEffect: [19, 0],
+  LeftHandEffect: [21, 2], RightHandEffect: [22, 1], BreathEffect: [17],
+  SpecialEffect: [19, 0], WorldEffect: [19, 0],
+};
+
+// Find where an effect is anchored by looking up its usage in kits/visuals.
+function findEffectAnchor(effectId) {
+  for (const k of tbl('SpellVisualKit')) {
+    for (const [f, label] of KIT_SLOT_FIELDS) {
+      if (k[f] === effectId) return { label: `${label} slot of kit #${k.ID}`, ids: SLOT_ANCHORS[f] };
+    }
+    const si = k.SpecialEffect.indexOf(effectId);
+    if (si >= 0) return { label: `Special ${si + 1} slot of kit #${k.ID}`, ids: SLOT_ANCHORS.SpecialEffect };
+    if (k.WorldEffect === effectId) return { label: `World slot of kit #${k.ID}`, ids: SLOT_ANCHORS.WorldEffect };
+  }
+  for (const v of tbl('SpellVisual')) {
+    if (v.MissileModel === effectId) return { label: `missile model of visual #${v.ID}`, ids: [34, 15] };
+    if (v.AreaModel === effectId) return { label: `area model of visual #${v.ID}`, ids: [19, 0] };
+  }
+  return { label: null, ids: [34, 15, 12] };
+}
+
+async function openLab(effect) {
+  const charPath = (lab && lab.charPath) || CHAR_MODELS[0];
+  lab = {
+    effect, charPath, attachIdx: 0, attachId: null, anchor: findEffectAnchor(effect.ID),
+    off: [0, 0, 0], yaw: 0, pitch: 0, roll: 0, scale: 1, charGeom: null, effectGeom: null,
+  };
+  renderEditor();
+}
+
+async function loadLabScene() {
+  if (!lab) return;
+  const my = lab;
+  const status = document.getElementById('lab-status');
+  try {
+    if (!charGeomCache.has(my.charPath)) {
+      if (status) status.textContent = `Loading ${my.charPath}…`;
+      charGeomCache.set(my.charPath, await fetchModel(my.charPath));
+    }
+    my.charGeom = charGeomCache.get(my.charPath);
+    if (status) status.textContent = 'Loading effect model…';
+    my.effectGeom = await fetchModel(my.effect.FileName);
+    if (lab !== my) return;
+    // default attachment: the user's previous pick, else the detected anchor slot
+    const atts = my.charGeom.attachments || [];
+    let idx = my.attachId != null ? atts.findIndex((a) => a.id === my.attachId) : -1;
+    if (idx < 0) {
+      for (const want of my.anchor.ids) {
+        const i = atts.findIndex((a) => a.id === want);
+        if (i >= 0) { idx = i; break; }
+      }
+    }
+    my.attachIdx = Math.max(0, idx);
+    renderLabControls();
+    Viewer.showComposite([
+      { geom: my.charGeom, gray: true, noParticles: true },
+      { geom: my.effectGeom, transform: labTransform() },
+    ]);
+    // effect textures (model index 1)
+    (my.effectGeom.textures || []).forEach(async (t, i) => {
+      if (!t.fileName) return;
+      try {
+        const res = await fetch(`/api/texture?path=${encodeURIComponent(t.fileName)}`);
+        if (!res.ok || lab !== my) return;
+        const w = Number(res.headers.get('X-Width')), h = Number(res.headers.get('X-Height'));
+        const rgba = new Uint8Array(await res.arrayBuffer());
+        if (lab === my && w && h && rgba.length === w * h * 4) Viewer.setModelTexture(1, i, w, h, rgba);
+      } catch (e2) { /* untextured */ }
+    });
+    Viewer.setLabDrag((delta) => {
+      if (!lab) return;
+      lab.off[0] += delta[0]; lab.off[1] += delta[1]; lab.off[2] += delta[2];
+      labChanged(true);
+    });
+    $('#preview-title').textContent = `Attachment lab — ${my.effect.Name || my.effect.FileName}`;
+    $('#preview-msg').textContent = 'Drag arrows = move on one axis. Shift+drag = free move. Drag = orbit. Right-drag = pan camera. Offsets are relative to the chosen attachment point.';
+    setOverlay(null);
+    if (status) status.textContent = '';
+  } catch (e) {
+    if (status) status.textContent = `Failed to load: ${e.message}`;
+  }
+}
+
+function labTransform() {
+  const atts = (lab.charGeom && lab.charGeom.attachments) || [];
+  const base = atts[lab.attachIdx] ? atts[lab.attachIdx].pos : [0, 0, 0];
+  return {
+    offset: [base[0] + lab.off[0], base[1] + lab.off[1], base[2] + lab.off[2]],
+    yaw: lab.yaw, pitch: lab.pitch, roll: lab.roll, scale: lab.scale,
+  };
+}
+
+function labChanged(syncInputs) {
+  if (!lab || !lab.charGeom) return;
+  Viewer.setTransform(1, labTransform());
+  if (syncInputs) {
+    for (const [id, val] of [['lab-x', lab.off[0]], ['lab-y', lab.off[1]], ['lab-z', lab.off[2]]]) {
+      const inp = document.getElementById(id);
+      if (inp) inp.value = val.toFixed(3);
+    }
+  }
+}
+
+function renderLabControls() {
+  const wrap = document.getElementById('lab-controls');
+  if (!wrap || !lab) return;
+  wrap.textContent = '';
+  const my = lab;
+  const num = (id, label, get, set, step) => el('div', { class: 'fld' },
+    el('label', {}, label),
+    el('input', {
+      id, type: 'number', step: step || '0.05', value: typeof get === 'number' ? get : get(), class: 'mono',
+      oninput: (e) => { set(parseFloat(e.target.value) || 0); labChanged(false); },
+    }));
+  const atts = (my.charGeom && my.charGeom.attachments) || [];
+  const attSel = el('select', {
+    onchange: (e) => {
+      my.attachIdx = Number(e.target.value);
+      my.attachId = atts[my.attachIdx] ? atts[my.attachIdx].id : null;
+      labChanged(true);
+    },
+  }, ...atts.map((a, i) => {
+    const o = el('option', { value: i }, `${a.id} — ${ATTACH_POINTS[a.id] || 'attachment ' + a.id}`);
+    if (i === my.attachIdx) o.selected = true;
+    return o;
+  }));
+  const charSel = el('select', {
+    onchange: (e) => { my.charPath = e.target.value; loadLabScene(); },
+  }, ...CHAR_MODELS.map((p) => {
+    const o = el('option', { value: p }, p.split('\\')[1] + ' ' + p.split('\\')[2]);
+    if (p === my.charPath) o.selected = true;
+    return o;
+  }));
+  const deg = Math.PI / 180;
+  wrap.append(
+    el('div', { class: 'field-grid' },
+      el('div', { class: 'fld' }, el('label', {}, 'Reference character'), charSel),
+      el('div', { class: 'fld' }, el('label', {}, 'Attachment point'), attSel),
+      num('lab-x', 'Offset X (+forward)', () => my.off[0], (v) => { my.off[0] = v; }),
+      num('lab-y', 'Offset Y (+left)', () => my.off[1], (v) => { my.off[1] = v; }),
+      num('lab-z', 'Offset Z (+up)', () => my.off[2], (v) => { my.off[2] = v; }),
+      num('lab-scale', 'Scale', () => my.scale, (v) => { my.scale = v || 1; }),
+      num('lab-yaw', 'Yaw °', () => my.yaw / deg, (v) => { my.yaw = v * deg; }, '5'),
+      num('lab-pitch', 'Pitch °', () => my.pitch / deg, (v) => { my.pitch = v * deg; }, '5'),
+      num('lab-roll', 'Roll °', () => my.roll / deg, (v) => { my.roll = v * deg; }, '5')),
+    el('div', { class: 'ed-sub', style: 'margin-top:8px' },
+      my.anchor.label
+        ? `Anchor detected: this effect is used as the ${my.anchor.label} — the attachment point defaulted to match. The exported model bakes only your offset, so in game it lands the same way relative to that attachment.`
+        : 'This effect is not referenced by any kit or visual yet — attachment defaulted to Chest. The exported model bakes only your offset relative to the chosen attachment.'));
+
+  const baseName = (my.effect.FileName || 'model').split('\\').pop().replace(/\.(mdx|mdl|m2)$/i, '');
+  const outInput = el('input', {
+    type: 'text', class: 'mono', value: `Custom\\${baseName}_pos.m2`, style: 'width: 320px',
+  });
+  wrap.append(el('div', { style: 'margin-top: 12px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap' },
+    el('label', {}, 'Export as '), outInput,
+    el('button', {
+      class: 'primary',
+      onclick: async () => {
+        try {
+          const r = await api('/api/bake-m2', {
+            method: 'POST',
+            body: {
+              sourcePath: my.effect.FileName,
+              outPath: outInput.value,
+              offset: my.off, yaw: my.yaw, pitch: my.pitch, roll: my.roll, scale: my.scale,
+            },
+          });
+          my.effect.FileName = r.outPath;
+          scheduleSave('SpellVisualEffectName', my.effect);
+          toast(`Baked ${r.bytes} bytes → gamedata\\${r.outPath} and set as this effect's model. Pack it with "Download patch MPQ".`);
+          lab = null;
+          Viewer.setLabDrag(null);
+          renderEditor();
+        } catch (e) { toast('Bake failed: ' + e.message, true); }
+      },
+    }, 'Bake & apply to effect'),
+    el('a', { class: 'linkbtn', href: '/api/export-patch', download: '' }, 'Download patch MPQ'),
+    el('button', { onclick: () => { lab = null; Viewer.setLabDrag(null); renderEditor(); } }, 'Close lab')));
 }
 
 // ---------- 3D preview ----------
@@ -839,6 +1092,59 @@ $('#btn-more').addEventListener('click', () => renderList(true));
 $('#chk-wireframe').addEventListener('change', (e) => Viewer.setWireframe(e.target.checked));
 $('#chk-spin').addEventListener('change', (e) => Viewer.setSpin(e.target.checked));
 $('#chk-particles').addEventListener('change', (e) => Viewer.setParticles(e.target.checked));
+{
+  const rng = $('#rng-bright');
+  const saved = Number(localStorage.getItem('previewBrightness'));
+  if (saved >= 0.5 && saved <= 4) rng.value = saved;
+  Viewer.setBrightness(Number(rng.value));
+  rng.addEventListener('input', (e) => {
+    Viewer.setBrightness(Number(e.target.value));
+    localStorage.setItem('previewBrightness', e.target.value);
+  });
+
+  const BG_NAMES = ['dark', 'medium', 'light'];
+  const btnBg = $('#btn-bg');
+  let bgIdx = Number(localStorage.getItem('previewBg')) || 0;
+  if (bgIdx < 0 || bgIdx >= Viewer.backgroundLevels) bgIdx = 0;
+  const applyBg = () => {
+    Viewer.setBackground(bgIdx);
+    btnBg.textContent = `bg: ${BG_NAMES[bgIdx]}`;
+    localStorage.setItem('previewBg', bgIdx);
+  };
+  applyBg();
+  btnBg.addEventListener('click', () => {
+    bgIdx = (bgIdx + 1) % Viewer.backgroundLevels;
+    applyBg();
+  });
+}
+
+// resizable preview panel
+{
+  const saved = Number(localStorage.getItem('previewWidth'));
+  if (saved >= 280) document.documentElement.style.setProperty('--preview-w', saved + 'px');
+  const resizer = $('#preview-resizer');
+  let resizing = false;
+  resizer.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    resizing = true;
+    resizer.classList.add('active');
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  });
+  window.addEventListener('mousemove', (e) => {
+    if (!resizing) return;
+    const w = Math.min(Math.round(window.innerWidth * 0.7), Math.max(280, window.innerWidth - e.clientX));
+    document.documentElement.style.setProperty('--preview-w', w + 'px');
+    localStorage.setItem('previewWidth', w);
+  });
+  window.addEventListener('mouseup', () => {
+    if (!resizing) return;
+    resizing = false;
+    resizer.classList.remove('active');
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+  });
+}
 
 // ---------- boot ----------
 
@@ -880,8 +1186,8 @@ async function boot(isReload) {
   if (!isReload) renderList();
   else { renderList(); renderEditor(); }
 
-  // deep link: #visual/4, #kit/8, #effect/2, #spell/133
-  const m = location.hash.match(/^#(spell|visual|kit|effect)\/(\d+)$/);
+  // deep link: #visual/4, #kit/8, #effect/2, #spell/133, #effect/716/lab
+  const m = location.hash.match(/^#(spell|visual|kit|effect)\/(\d+)(\/lab)?$/);
   if (m && !isReload) {
     const tabKey = Object.keys(TAB_DEF).find((k) => TAB_DEF[k].type === m[1]);
     if (tabKey && tabKey !== state.tab) {
@@ -890,6 +1196,10 @@ async function boot(isReload) {
       await renderList();
     }
     select(m[1], Number(m[2]));
+    if (m[3] && m[1] === 'effect') {
+      const eff = rec('SpellVisualEffectName', Number(m[2]));
+      if (eff) openLab(eff);
+    }
   }
 }
 

@@ -53,6 +53,25 @@ function parseM2(buf) {
   // --- particle emitters (vanilla M2ParticleOld, 0x1F8 bytes each) ---
   const particles = parseParticles(buf, arr, textures.length);
 
+  // --- attachment points (vanilla M2Attachment, 48 bytes: id u32, bone u16,
+  // unk u16, position C3Vector, M2Track<uchar>) — used by the attachment lab ---
+  const attachments = [];
+  try {
+    const atArr = arr(0x104);
+    if (atArr.count > 0 && atArr.count <= 96 && atArr.offset + atArr.count * 48 <= buf.length) {
+      for (let i = 0; i < atArr.count; i++) {
+        const o = atArr.offset + i * 48;
+        const id = buf.readUInt32LE(o);
+        const bone = buf.readUInt16LE(o + 4);
+        const pos = [buf.readFloatLE(o + 8), buf.readFloatLE(o + 12), buf.readFloatLE(o + 16)];
+        if (id > 200 || pos.some((v) => !Number.isFinite(v) || Math.abs(v) > 100)) throw new Error('bad attachment');
+        attachments.push({ id, bone, pos });
+      }
+    }
+  } catch (e) {
+    attachments.length = 0;
+  }
+
   const vertices = arr(0x44);
   const views = arr(0x4C);
   const VSTRIDE = 48;
@@ -61,7 +80,7 @@ function parseM2(buf) {
     // Pure particle-emitter model (precast glows, sprays, etc.) — no mesh.
     return {
       name, version, particleOnly: true, vertexCount: 0,
-      positions: [], normals: [], uvs: [], indices: [], batches: [], textures, particles,
+      positions: [], normals: [], uvs: [], indices: [], batches: [], textures, particles, attachments,
     };
   }
 
@@ -153,7 +172,7 @@ function parseM2(buf) {
     batches = [];
   }
 
-  return { name, version, vertexCount: vertices.count, positions, normals, uvs, indices, textures, batches, particles };
+  return { name, version, vertexCount: vertices.count, positions, normals, uvs, indices, textures, batches, particles, attachments };
 }
 
 // Vanilla M2ParticleOld (504 bytes). Track values are sampled at their first
