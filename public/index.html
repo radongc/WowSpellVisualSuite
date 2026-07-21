@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spell Visual Editor — WoW 1.12.1</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header id="topbar">
+  <div class="brand">⚡ Spell Visual Editor <span class="ver">1.12.1</span></div>
+  <div id="dirty-indicator" class="dirty-indicator" hidden>unsaved changes: <span id="dirty-tables"></span></div>
+  <div class="spacer"></div>
+  <button id="btn-save" class="primary">Save DBCs</button>
+  <button id="btn-reload" title="Discard in-memory edits and reload all DBC files from disk">Reload from disk</button>
+</header>
+
+<div id="layout">
+  <aside id="sidebar">
+    <nav id="tabs">
+      <button data-tab="spells" class="tab active">Spells</button>
+      <button data-tab="visuals" class="tab">Visuals</button>
+      <button data-tab="kits" class="tab">Kits</button>
+      <button data-tab="effects" class="tab">Effects</button>
+    </nav>
+    <div class="search-row">
+      <input id="search" type="search" placeholder="Search by name or ID…" autocomplete="off">
+    </div>
+    <div class="list-actions">
+      <button id="btn-new" title="Create a new record in the current tab">+ New</button>
+      <button id="btn-clone" title="Clone the selected record" disabled>Clone</button>
+      <button id="btn-delete" class="danger" title="Delete the selected record" disabled>Delete</button>
+    </div>
+    <div id="list" class="list"></div>
+    <div id="list-more" class="list-more" hidden><button id="btn-more">Load more…</button></div>
+  </aside>
+
+  <main id="editor">
+    <div id="editor-empty" class="empty-state">
+      <h2>WoW 1.12.1 Spell Visual Editor</h2>
+      <p>Select a spell, visual, kit, or effect from the left to begin.</p>
+      <div id="status-summary"></div>
+    </div>
+    <div id="editor-content" hidden></div>
+  </main>
+
+  <aside id="preview">
+    <div class="preview-head">
+      <span id="preview-title">Model preview</span>
+      <span id="preview-stats"></span>
+    </div>
+    <div class="canvas-wrap">
+      <canvas id="gl"></canvas>
+      <div id="preview-overlay" class="preview-overlay" hidden></div>
+    </div>
+    <div id="preview-msg" class="preview-msg"></div>
+    <div class="preview-foot">
+      <label><input type="checkbox" id="chk-wireframe"> wireframe</label>
+      <label><input type="checkbox" id="chk-spin" checked> spin</label>
+      <label><input type="checkbox" id="chk-particles" checked> particles</label>
+    </div>
+  </aside>
+</div>
+
+<div id="toast" hidden></div>
+
+<script src="viewer.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
