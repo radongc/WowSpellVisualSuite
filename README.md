@@ -25,6 +25,11 @@ Then open **http://localhost:3414** (set `PORT` to change).
 - 3D preview of effect models (see *Game data* below), with a **model browser**
   (effect editor → "browse…") to search every model in your archives, preview each in 3D,
   and pick one — instead of typing a raw path.
+- **Spell storyboard** (▶ button on spells and visuals): plays the whole sequence on a
+  caster/target mannequin pair — precast kit while casting → cast kit + anim → missile
+  flight at the spell's real speed with particle trails → impact kit on the target →
+  looping state aura — with kit sounds and animations firing at each phase. Loops until
+  you navigate away.
 - **Animation playback**: full vanilla M2 skeletal animation (bone tracks, CPU skinning,
   billboard bones) — spell models auto-play their effect loop, and the preview footer has
   an animation selector (mannequins play Stand by default in the attachment lab).

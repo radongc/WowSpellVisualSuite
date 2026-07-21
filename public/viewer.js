@@ -14,7 +14,7 @@ const Viewer = (() => {
   const canvas = document.getElementById('gl');
   const gl = canvas.getContext('webgl', { antialias: true, alpha: false });
   if (!gl) {
-    return { show() {}, showComposite() {}, clear() {}, setTexture() {}, setModelTexture() {}, setTransform() {}, setLabDrag() {}, setWireframe() {}, setSpin() {}, setParticles() {}, setBrightness() {}, setBackground() {}, backgroundLevels: 3, setAnimation() {}, getAnimation() { return -1; } };
+    return { show() {}, showComposite() {}, clear() {}, setTexture() {}, setModelTexture() {}, setTransform() {}, setVisible() {}, setLabDrag() {}, setWireframe() {}, setSpin() {}, setParticles() {}, setBrightness() {}, setBackground() {}, backgroundLevels: 3, setAnimation() {}, getAnimation() { return -1; } };
   }
   let models = [];            // [{ mesh, textures, emitters, transform, gray }]
   let sceneCenter = [0, 0, 0.5], sceneRadius = 1;
@@ -518,6 +518,7 @@ const Viewer = (() => {
     const md = {
       mesh, textures, emitters, bounds,
       gray: !!item.gray,
+      visible: item.visible !== false,
       T: makeTransform(item.transform),
       rawTransform: item.transform || null,
       skel: null, animSeq: -1, animT0: 0,
@@ -615,13 +616,24 @@ const Viewer = (() => {
     md.textures[i] = tex;
   }
 
-  function setTransform(mi, transform) {
+  function setTransform(mi, transform, opts = {}) {
     const md = models[mi];
     if (!md) return;
     md.T = makeTransform(transform);
     md.rawTransform = transform;
-    for (const e of md.emitters) e.pool.length = 0; // respawn at new location
-    reframe();
+    // keepParticles leaves already-spawned particles in world space (moving
+    // emitters leave natural trails, e.g. missiles in flight)
+    if (!opts.keepParticles) {
+      for (const e of md.emitters) e.pool.length = 0;
+      reframe();
+    }
+  }
+
+  function setVisible(mi, v) {
+    const md = models[mi];
+    if (!md) return;
+    md.visible = !!v;
+    if (!v) for (const e of md.emitters) { e.pool.length = 0; e.acc = 0; }
   }
 
   function clear() {
@@ -701,11 +713,13 @@ const Viewer = (() => {
           }
           p.x += p.vx * dt; p.y += p.vy * dt; p.z += p.vz * dt;
         }
-        e.acc += e.rate * dt;
-        while (e.acc >= 1 && e.pool.length < e.cap && total < MAXP) {
-          e.acc -= 1;
-          e.pool.push(spawn(d, md.T));
-          total++;
+        if (md.visible) {
+          e.acc += e.rate * dt;
+          while (e.acc >= 1 && e.pool.length < e.cap && total < MAXP) {
+            e.acc -= 1;
+            e.pool.push(spawn(d, md.T));
+            total++;
+          }
         }
         if (e.acc > 4) e.acc = 4;
       }
@@ -865,7 +879,7 @@ const Viewer = (() => {
 
     // animate + skin
     for (const md of models) {
-      if (!md.mesh || !md.skel || md.animSeq < 0) continue;
+      if (!md.mesh || !md.skel || md.animSeq < 0 || !md.visible) continue;
       // billboard axes must live in model space: undo the model transform's rotation
       let br = right, bu = up;
       if (md.T) {
@@ -885,7 +899,7 @@ const Viewer = (() => {
       gl.bufferSubData(gl.ARRAY_BUFFER, 0, md.skin.outNrm);
     }
 
-    for (const md of models) if (md.mesh) drawMesh(md, mvp);
+    for (const md of models) if (md.mesh && md.visible) drawMesh(md, mvp);
 
     // particles across all models
     if (particlesOn && models.some((m) => m.emitters.length)) {
@@ -1015,7 +1029,7 @@ const Viewer = (() => {
   return {
     show, showComposite, clear,
     setTexture: (i, w, h, rgba) => setModelTexture(0, i, w, h, rgba),
-    setModelTexture, setTransform,
+    setModelTexture, setTransform, setVisible,
     setLabDrag: (cb) => {
       labDragCb = cb;
       if (!cb) {

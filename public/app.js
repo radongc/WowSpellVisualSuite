@@ -244,6 +244,7 @@ function select(type, id, crumbs) {
 
 function renderEditor() {
   const sel = state.selection;
+  stopStoryboard();
   if (lab && (!sel || sel.type !== 'effect' || sel.id !== lab.effect.ID)) {
     lab = null;
     Viewer.setLabDrag(null);
@@ -429,7 +430,12 @@ async function renderSpellEditor(content, id) {
       el('div', { class: 'field-grid' },
         refField(spell, 'Spell', 'SpellVisualID', 'Visual 1', REFS.visual, { index: 0, after: () => renderEditor() }),
         refField(spell, 'Spell', 'SpellVisualID', 'Visual 2', REFS.visual, { index: 1, after: () => renderEditor() })),
-      spell.SpellVisualID[0] > 0 ? el('div', { style: 'margin-top:8px' },
+      spell.SpellVisualID[0] > 0 ? el('div', { style: 'margin-top:8px; display:flex; gap:8px; flex-wrap:wrap' },
+        el('button', {
+          class: 'primary',
+          title: 'Play the full spell sequence with this spell’s cast time and missile speed',
+          onclick: () => openStoryboard(spell.SpellVisualID[0], spell),
+        }, '▶ Storyboard'),
         el('button', {
           title: 'Clone visual 1 with all its kits and effects, and point this spell at the new copy — ready to customize without touching the original',
           onclick: () => cloneChain(spell.SpellVisualID[0], spell.ID, 0),
@@ -478,7 +484,12 @@ function renderVisualEditor(content, id) {
     el('button', {
       title: 'Clone this visual together with all its kits and effects, rewiring every reference to the new copies',
       onclick: () => cloneChain(v.ID),
-    }, 'Deep clone chain')));
+    }, 'Deep clone chain'),
+    el('button', {
+      class: 'primary',
+      title: 'Play the full spell sequence on a caster/target pair: precast → cast → missile → impact → state',
+      onclick: () => openStoryboard(v.ID, null),
+    }, '▶ Storyboard')));
   const usedBy = el('div', { class: 'ed-sub' }, 'Looking up spells using this visual…');
   content.append(usedBy);
   api(`/api/spells?visual=${id}&limit=500`).then((page) => {
@@ -950,6 +961,219 @@ function renderLabControls() {
     }, 'Bake & apply to effect'),
     el('a', { class: 'linkbtn', href: '/api/export-patch', download: '' }, 'Download patch MPQ'),
     el('button', { onclick: () => { lab = null; Viewer.setLabDrag(null); renderEditor(); } }, 'Close lab')));
+}
+
+// ---------- spell storyboard ----------
+// Plays the full visual sequence on a caster + target pair: precast (while
+// casting) → cast → missile flight → impact → state aura, with kit anims,
+// sounds and camera-visible effect models per phase.
+
+let story = null;
+
+function stopStoryboard() {
+  if (story) {
+    cancelAnimationFrame(story.raf);
+    story = null;
+  }
+}
+
+const KIT_SLOT_ATTACH = {
+  HeadEffect: [11, 20], ChestEffect: [34, 15], BaseEffect: [19, 0],
+  LeftHandEffect: [21, 2], RightHandEffect: [22, 1], BreathEffect: [17],
+};
+
+function attachPosOf(charGeom, ids) {
+  for (const id of ids) {
+    const a = (charGeom.attachments || []).find((x) => x.id === id);
+    if (a) return a.pos;
+  }
+  return [0, 0, 1];
+}
+
+function seqIndexForAnim(charGeom, animIds) {
+  const seqs = (charGeom.skeleton && charGeom.skeleton.sequences) || [];
+  for (const id of animIds) {
+    const i = seqs.findIndex((s) => s.id === id && s.end > s.start);
+    if (i >= 0) return i;
+  }
+  return seqs.findIndex((s) => s.id === 0);
+}
+
+async function fetchTexturesFor(mi, geom) {
+  (geom.textures || []).forEach(async (t, i) => {
+    if (!t.fileName) return;
+    try {
+      const res = await fetch(`/api/texture?path=${encodeURIComponent(t.fileName)}`);
+      if (!res.ok) return;
+      const w = Number(res.headers.get('X-Width')), h = Number(res.headers.get('X-Height'));
+      const rgba = new Uint8Array(await res.arrayBuffer());
+      if (w && h && rgba.length === w * h * 4) Viewer.setModelTexture(mi, i, w, h, rgba);
+    } catch (e2) { /* untextured */ }
+  });
+}
+
+async function openStoryboard(visualId, spell) {
+  stopStoryboard();
+  const v = rec('SpellVisual', visualId);
+  if (!v) return toast(`SpellVisual #${visualId} not found.`, true);
+
+  let castTime = 2000;
+  let speed = spell && spell.Speed > 0 ? spell.Speed : 20;
+  if (spell) {
+    const ct = rec('SpellCastTimes', spell.CastingTimeIndex);
+    if (ct && ct.Base > 0) castTime = ct.Base;
+  }
+  castTime = Math.max(1200, castTime);
+  const DIST = 15;
+
+  const charPath = CHAR_MODELS[0];
+  if (!charGeomCache.has(charPath)) charGeomCache.set(charPath, await fetchModel(charPath));
+  const cg = charGeomCache.get(charPath);
+
+  const kits = { precast: v.PrecastKit, cast: v.CastKit, impact: v.ImpactKit, state: v.StateKit };
+  const fx = [];
+  for (const [phase, kid] of Object.entries(kits)) {
+    const k = kid > 0 ? rec('SpellVisualKit', kid) : null;
+    if (!k) continue;
+    const tgt = phase === 'impact' || phase === 'state' ? 'target' : 'caster';
+    for (const [f] of KIT_SLOT_FIELDS) {
+      if (k[f] > 0) fx.push({ phase, tgt, effectId: k[f], attachIds: KIT_SLOT_ATTACH[f] || [19, 0] });
+    }
+    for (const e2 of k.SpecialEffect) if (e2 > 0) fx.push({ phase, tgt, effectId: e2, attachIds: [19, 0] });
+    if (k.WorldEffect > 0) fx.push({ phase, tgt, effectId: k.WorldEffect, attachIds: [19, 0] });
+  }
+
+  const geomCache = new Map();
+  const fxGeom = async (effectId) => {
+    const e2 = rec('SpellVisualEffectName', effectId);
+    if (!e2 || !e2.FileName) return null;
+    if (!geomCache.has(effectId)) {
+      try { geomCache.set(effectId, await fetchModel(e2.FileName)); }
+      catch (err) { geomCache.set(effectId, null); }
+    }
+    return geomCache.get(effectId);
+  };
+
+  const casterPos = [0, 0, 0], targetPos = [DIST, 0, 0];
+  const items = [
+    { geom: cg, gray: true, noParticles: true, transform: { offset: casterPos } },
+    { geom: cg, gray: true, noParticles: true, transform: { offset: targetPos, yaw: Math.PI } },
+  ];
+  const fxModels = [];
+  for (const f of fx.slice(0, 10)) {
+    const g = await fxGeom(f.effectId);
+    if (!g || (g.particleOnly && !(g.particles || []).length)) continue;
+    const base = f.tgt === 'caster' ? casterPos : targetPos;
+    const ap = attachPosOf(cg, f.attachIds);
+    const yaw = f.tgt === 'target' ? Math.PI : 0;
+    const rp = yaw ? [-ap[0], -ap[1], ap[2]] : ap;
+    items.push({ geom: g, visible: false, transform: { offset: [base[0] + rp[0], base[1] + rp[1], base[2] + rp[2]], yaw } });
+    fxModels.push({ mi: items.length - 1, phase: f.phase });
+  }
+
+  let missileMi = -1, missileStart = null, missileEnd = null;
+  if (v.MissileModel > 0) {
+    const g = await fxGeom(v.MissileModel);
+    if (g) {
+      const ap = attachPosOf(cg, [34, 15]);
+      missileStart = [casterPos[0] + ap[0], casterPos[1] + ap[1], casterPos[2] + ap[2]];
+      missileEnd = [targetPos[0] - ap[0], targetPos[1] - ap[1], targetPos[2] + ap[2]];
+      items.push({ geom: g, visible: false, transform: { offset: missileStart.slice() } });
+      missileMi = items.length - 1;
+    }
+  }
+
+  Viewer.showComposite(items);
+  populateAnimSelect(null);
+  for (let mi = 2; mi < items.length; mi++) fetchTexturesFor(mi, items[mi].geom);
+
+  const kitSound = (kid) => {
+    const k = kid > 0 ? rec('SpellVisualKit', kid) : null;
+    if (k && k.SoundID > 0) new Audio(`/api/sound/${k.SoundID}`).play().catch(() => {});
+  };
+  const setChar = (mi, animIds) => {
+    const i = seqIndexForAnim(cg, animIds);
+    if (i >= 0) Viewer.setAnimation(mi, i);
+  };
+  const kitAnim = (kid, fallback) => {
+    const k = kid > 0 ? rec('SpellVisualKit', kid) : null;
+    return k && k.AnimID > 0 ? [k.AnimID, ...fallback] : fallback;
+  };
+
+  const flightMs = (DIST / speed) * 1000;
+  const T_cast = castTime;
+  const T_impact = T_cast + (missileMi >= 0 ? flightMs : 300);
+  const T_state = T_impact + 1500;
+  const T_end = T_state + (kits.state > 0 ? 3000 : 800);
+  const T_loop = T_end + 600;
+  const showPhase = (phase, on) => {
+    for (const f of fxModels) if (f.phase === phase) Viewer.setVisible(f.mi, on);
+  };
+
+  $('#preview-title').textContent = `Storyboard — visual #${visualId}${spell ? ` (${spell.Name.enUS})` : ''}`;
+  $('#preview-stats').textContent = `${fxModels.length} effect model(s)${missileMi >= 0 ? ' + missile' : ''}`;
+  const msg = $('#preview-msg');
+  setOverlay(null);
+
+  const st = { t0: performance.now(), phase: '', raf: 0 };
+  story = st;
+  const enter = (phase) => {
+    if (st.phase === phase) return;
+    st.phase = phase;
+    msg.textContent = `▶ ${phase} — cast ${Math.round(castTime)}ms · ${DIST}yd` +
+      (missileMi >= 0 ? ` · missile ${speed.toFixed(0)} yd/s (${Math.round(flightMs)}ms)` : '') + ' · loops';
+    if (phase === 'precast') {
+      showPhase('state', false); showPhase('impact', false); showPhase('cast', false);
+      showPhase('precast', true);
+      setChar(0, kitAnim(kits.precast, [31, 32, 0]));
+      setChar(1, [0]);
+      kitSound(kits.precast);
+    } else if (phase === 'cast') {
+      showPhase('precast', false);
+      showPhase('cast', true);
+      setChar(0, kitAnim(kits.cast, [32, 78, 0]));
+      kitSound(kits.cast);
+      if (missileMi >= 0) Viewer.setVisible(missileMi, true);
+      if (v.MissileSound > 0) new Audio(`/api/sound/${v.MissileSound}`).play().catch(() => {});
+    } else if (phase === 'impact') {
+      showPhase('cast', false);
+      if (missileMi >= 0) Viewer.setVisible(missileMi, false);
+      showPhase('impact', true);
+      setChar(0, [0]);
+      setChar(1, [9, 0]); // CombatWound flinch
+      kitSound(kits.impact);
+    } else if (phase === 'state') {
+      showPhase('impact', false);
+      showPhase('state', true);
+      setChar(1, [0]);
+      kitSound(kits.state);
+    } else if (phase === 'rest') {
+      showPhase('state', false);
+    }
+  };
+  const tick = (now) => {
+    if (story !== st) return;
+    const t = (now - st.t0) % T_loop;
+    if (t < T_cast) enter('precast');
+    else if (t < T_impact) {
+      enter('cast');
+      if (missileMi >= 0) {
+        const p = Math.min(1, (t - T_cast) / flightMs);
+        const arc = v.MissilePathType === 1 ? 2 : v.MissilePathType === 2 ? 5 : 0;
+        Viewer.setTransform(missileMi, {
+          offset: [
+            missileStart[0] + (missileEnd[0] - missileStart[0]) * p,
+            missileStart[1] + (missileEnd[1] - missileStart[1]) * p,
+            missileStart[2] + (missileEnd[2] - missileStart[2]) * p + Math.sin(Math.PI * p) * arc,
+          ],
+        }, { keepParticles: true });
+      }
+    } else if (t < T_state) enter('impact');
+    else if (t < T_end) enter('state');
+    else enter('rest');
+    st.raf = requestAnimationFrame(tick);
+  };
+  st.raf = requestAnimationFrame(tick);
 }
 
 // ---------- model browser ----------
@@ -1460,6 +1684,8 @@ async function boot(isReload) {
     loadTable('SpellEffectCameraShakes'),
     loadTable('SoundEntries'),
     loadTable('AnimationData'),
+    loadTable('SpellCastTimes'),
+    loadTable('SpellRange'),
   ]);
   buildDatalists();
 
@@ -1492,8 +1718,8 @@ async function boot(isReload) {
 
   // deep link: #files opens the save/export dialog
   if (location.hash === '#files' && !isReload) openFileDialog();
-  // deep link: #visual/4, #kit/8, #effect/2, #spell/133, #effect/716/lab, #effect/2/browse
-  const m = location.hash.match(/^#(spell|visual|kit|effect)\/(\d+)(\/lab|\/browse)?$/);
+  // deep link: #visual/4, #kit/8, #effect/2, #spell/133, #effect/716/lab, #effect/2/browse, #visual/6824/story
+  const m = location.hash.match(/^#(spell|visual|kit|effect)\/(\d+)(\/lab|\/browse|\/story)?$/);
   if (m && !isReload) {
     const tabKey = Object.keys(TAB_DEF).find((k) => TAB_DEF[k].type === m[1]);
     if (tabKey && tabKey !== state.tab) {
@@ -1502,10 +1728,12 @@ async function boot(isReload) {
       await renderList();
     }
     select(m[1], Number(m[2]));
-    if (m[3] && m[1] === 'effect') {
+    if (m[3] === '/story' && m[1] === 'visual') {
+      openStoryboard(Number(m[2]), null);
+    } else if (m[3] && m[1] === 'effect') {
       const eff = rec('SpellVisualEffectName', Number(m[2]));
       if (eff && m[3] === '/lab') openLab(eff);
-      else if (eff) {
+      else if (eff && m[3] === '/browse') {
         openModelBrowser((path) => {
           eff.FileName = path;
           scheduleSave('SpellVisualEffectName', eff);
