@@ -8,6 +8,7 @@ let storm = null;                 // lazy-loaded stormjs module
 const mounts = new Map();         // real dir -> emscripten mount point
 let archives = [];                // [{ name, mpq }] in lookup priority order
 let errors = [];                  // [{ name, error }]
+let modelCache = null;            // [{ path, archive, size }] — all models across archives
 
 function loadStorm() {
   if (!storm) storm = require('@wowserhq/stormjs');
@@ -54,6 +55,7 @@ async function init(gamedataDir) {
   }
   archives = [];
   errors = [];
+  modelCache = null;
   const found = discoverArchives(gamedataDir);
   if (!found.length) return list();
   const { MPQ } = loadStorm();
@@ -90,4 +92,26 @@ function readFile(vpath) {
   return null;
 }
 
-module.exports = { init, list, readFile };
+// Enumerate every model file (.m2/.mdx/.mdl) across the archive chain.
+// Cached until the next init(). Priority order means the first occurrence of a
+// path is the one the client would actually load.
+function listModels() {
+  if (modelCache) return modelCache;
+  const seen = new Map();
+  for (const a of archives) {
+    let results = [];
+    try { results = a.mpq.search('*'); } catch (e) { continue; }
+    for (const r of results) {
+      const nm = r.fileName;
+      if (!nm || !/\.(m2|mdx|mdl)$/i.test(nm)) continue;
+      if (/^File\d{8}/i.test(nm)) continue; // archive lacks a (listfile) — pseudo names are unusable
+      const norm = nm.replace(/\//g, '\\');
+      const key = norm.toLowerCase();
+      if (!seen.has(key)) seen.set(key, { path: norm, archive: a.name, size: r.fileSize || 0 });
+    }
+  }
+  modelCache = [...seen.values()].sort((x, y) => x.path.localeCompare(y.path));
+  return modelCache;
+}
+
+module.exports = { init, list, readFile, listModels };

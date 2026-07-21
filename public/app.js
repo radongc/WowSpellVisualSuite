@@ -685,11 +685,21 @@ function renderEffectEditor(content, id) {
       usedKits.length > 6 ? ` … +${usedKits.length - 6}` : ''));
   }
 
+  const fileField = textField(e, 'SpellVisualEffectName', 'FileName', 'Model file', { mono: true, wide: true, after: () => previewEffectId(e.ID) });
+  fileField.querySelector('label').append(' ', el('button', {
+    class: 'linkbtn',
+    title: 'Browse and preview every model in your archives',
+    onclick: () => openModelBrowser((path) => {
+      e.FileName = path;
+      scheduleSave('SpellVisualEffectName', e);
+      renderEditor();
+    }),
+  }, 'browse…'));
   content.append(el('div', { class: 'card' },
     el('h3', {}, 'Effect model'),
     el('div', { class: 'field-grid' },
       textField(e, 'SpellVisualEffectName', 'Name', 'Name', { wide: true, after: () => renderList() }),
-      textField(e, 'SpellVisualEffectName', 'FileName', 'Model file', { mono: true, wide: true, after: () => previewEffectId(e.ID) }),
+      fileField,
       numField(e, 'SpellVisualEffectName', 'AreaEffectSize', 'Area effect size'),
       numField(e, 'SpellVisualEffectName', 'Scale', 'Scale', { float: true }))));
 
@@ -912,6 +922,86 @@ function renderLabControls() {
     el('button', { onclick: () => { lab = null; Viewer.setLabDrag(null); renderEditor(); } }, 'Close lab')));
 }
 
+// ---------- model browser ----------
+
+// Browse every model in the archives/loose files; onPick(path) applies the choice.
+function openModelBrowser(onPick) {
+  const state2 = { q: '', dir: '', offset: 0, total: 0, selected: null };
+  const backdrop = el('div', { class: 'modal-backdrop', onclick: (e) => { if (e.target === backdrop) close(); } });
+  const listEl = el('div', { class: 'model-list' });
+  const countEl = el('span', { class: 'sub' });
+  const dirSel = el('select', { onchange: (e) => { state2.dir = e.target.value; load(false); } },
+    el('option', { value: '' }, 'all folders'));
+  const searchInput = el('input', {
+    type: 'search', placeholder: 'Search models… (e.g. barrel, missile, totem)', autocomplete: 'off',
+    oninput: (e) => {
+      clearTimeout(searchInput._t);
+      searchInput._t = setTimeout(() => { state2.q = e.target.value; load(false); }, 200);
+    },
+  });
+  const useBtn = el('button', {
+    class: 'primary', disabled: true,
+    onclick: () => { if (state2.selected) { onPick(state2.selected); close(); } },
+  }, 'Use selected model');
+  const moreBtn = el('button', { onclick: () => load(true), hidden: true }, 'Load more…');
+
+  const modal = el('div', { class: 'modal' },
+    el('div', { class: 'modal-head' },
+      el('b', {}, 'Browse models'),
+      countEl,
+      el('span', { class: 'spacer' }),
+      el('button', { onclick: close }, '✕')),
+    el('div', { class: 'modal-toolbar' }, searchInput, dirSel),
+    listEl,
+    el('div', { class: 'modal-foot' },
+      el('span', { class: 'sub' }, 'Click = 3D preview · double-click = use'),
+      el('span', { class: 'spacer' }),
+      moreBtn, useBtn));
+  backdrop.append(modal);
+  document.body.append(backdrop);
+  searchInput.focus();
+
+  function close() {
+    backdrop.remove();
+    document.removeEventListener('keydown', onKey);
+  }
+  function onKey(e) { if (e.key === 'Escape') close(); }
+  document.addEventListener('keydown', onKey);
+
+  let dirsLoaded = false;
+  async function load(append) {
+    if (!append) { state2.offset = 0; listEl.textContent = ''; }
+    else state2.offset += 200;
+    try {
+      const data = await api(`/api/models?q=${encodeURIComponent(state2.q)}&dir=${encodeURIComponent(state2.dir)}&offset=${state2.offset}&limit=200`);
+      state2.total = data.total;
+      countEl.textContent = ` ${data.total} model${data.total === 1 ? '' : 's'}`;
+      if (!dirsLoaded) {
+        dirsLoaded = true;
+        for (const d of data.dirs) dirSel.append(el('option', { value: d.name }, `${d.name} (${d.count})`));
+      }
+      for (const f of data.records) {
+        const row = el('div', { class: 'model-row' },
+          el('span', { class: 'nm mono' }, f.path),
+          el('span', { class: 'sub' }, `${(f.size / 1024).toFixed(0)} KB · ${f.archive}`));
+        row.addEventListener('click', () => {
+          listEl.querySelectorAll('.model-row.selected').forEach((n) => n.classList.remove('selected'));
+          row.classList.add('selected');
+          state2.selected = f.path;
+          useBtn.disabled = false;
+          previewModelPath(f.path);
+        });
+        row.addEventListener('dblclick', () => { onPick(f.path); close(); });
+        listEl.append(row);
+      }
+      moreBtn.hidden = state2.offset + 200 >= data.total;
+    } catch (e) {
+      listEl.append(el('div', { class: 'banner' }, `Failed to list models: ${e.message}`));
+    }
+  }
+  load(false);
+}
+
 // ---------- 3D preview ----------
 
 let previewSeq = 0;
@@ -943,18 +1033,26 @@ async function previewEffectId(id) {
     return;
   }
   title.textContent = e.Name || e.FileName;
+  await previewModelPath(e.FileName, { seq, keepTitle: true });
+}
+
+// Load + show a model by raw game path (shared by effect preview and the browser).
+async function previewModelPath(filePath, opts = {}) {
+  const seq = opts.seq != null ? opts.seq : ++previewSeq;
+  const title = $('#preview-title'), msg = $('#preview-msg'), stats = $('#preview-stats');
+  if (!opts.keepTitle) title.textContent = String(filePath).split('\\').pop();
   msg.textContent = 'Loading model…';
   stats.textContent = '';
   try {
-    const geom = await api(`/api/model?path=${encodeURIComponent(e.FileName)}`);
+    const geom = await api(`/api/model?path=${encodeURIComponent(filePath)}`);
     if (seq !== previewSeq) return;
     const emitters = (geom.particles || []).length;
     if (geom.particleOnly && !emitters) {
       Viewer.clear();
-      setOverlay(`<div><b>No previewable content.</b><br><code>${escapeHtml(e.FileName)}</code><br><br>` +
+      setOverlay(`<div><b>No previewable content.</b><br><code>${escapeHtml(filePath)}</code><br><br>` +
         'This model has no mesh and no readable particle emitters.</div>');
       stats.textContent = '';
-      msg.textContent = `${e.FileName} → ${geom.file}`;
+      msg.textContent = `${filePath} → ${geom.file}`;
       return;
     }
     Viewer.show(geom);
@@ -965,7 +1063,7 @@ async function previewEffectId(id) {
     if (emitters) parts.push(`${emitters} emitter${emitters > 1 ? 's' : ''}`);
     if (texNames.length) parts.push(`${texNames.length} tex`);
     stats.textContent = parts.join(' / ');
-    msg.textContent = `${e.FileName} → ${geom.file}${geom.particleOnly ? ' (particles only — approximate preview)' : ''}`;
+    msg.textContent = `${filePath} → ${geom.file}${geom.particleOnly ? ' (particles only — approximate preview)' : ''}`;
     // fetch and apply BLP textures asynchronously
     (geom.textures || []).forEach(async (t, i) => {
       if (!t.fileName) return;
@@ -982,17 +1080,17 @@ async function previewEffectId(id) {
     if (seq !== previewSeq) return;
     Viewer.clear();
     if (err.status === 404 && err.data && err.data.archives && err.data.archives.length) {
-      setOverlay(`<div><b>Model not found in your archives:</b><br><code>${escapeHtml(e.FileName)}</code><br><br>` +
+      setOverlay(`<div><b>Model not found in your archives:</b><br><code>${escapeHtml(filePath)}</code><br><br>` +
         `Searched: <code>${escapeHtml(err.data.archives.join(', '))}</code></div>`);
-      msg.textContent = `${e.FileName} — ${err.message}`;
+      msg.textContent = `${filePath} — ${err.message}`;
     } else if (err.status === 404) {
-      setOverlay(`<div><b>No game models found.</b><br>The DBC only stores the model path:<br><code>${escapeHtml(e.FileName)}</code><br><br>` +
+      setOverlay(`<div><b>No game models found.</b><br>The DBC only stores the model path:<br><code>${escapeHtml(filePath)}</code><br><br>` +
         'Copy your 1.12.1 client’s <code>model.MPQ</code>, <code>patch.MPQ</code> and <code>patch-2.MPQ</code> ' +
         'into <code>gamedata/</code> at the project root (the whole <code>Data</code> folder works too), then press <b>Reload from disk</b>.</div>');
-      msg.textContent = `${e.FileName} — ${err.data && err.data.hint || err.message}`;
+      msg.textContent = `${filePath} — ${err.data && err.data.hint || err.message}`;
     } else {
-      setOverlay(`<div><b>Could not parse model:</b><br><code>${escapeHtml(e.FileName)}</code><br>${escapeHtml(err.message)}</div>`);
-      msg.textContent = `${e.FileName} — ${err.message}`;
+      setOverlay(`<div><b>Could not parse model:</b><br><code>${escapeHtml(filePath)}</code><br>${escapeHtml(err.message)}</div>`);
+      msg.textContent = `${filePath} — ${err.message}`;
     }
   }
 }
@@ -1186,8 +1284,8 @@ async function boot(isReload) {
   if (!isReload) renderList();
   else { renderList(); renderEditor(); }
 
-  // deep link: #visual/4, #kit/8, #effect/2, #spell/133, #effect/716/lab
-  const m = location.hash.match(/^#(spell|visual|kit|effect)\/(\d+)(\/lab)?$/);
+  // deep link: #visual/4, #kit/8, #effect/2, #spell/133, #effect/716/lab, #effect/2/browse
+  const m = location.hash.match(/^#(spell|visual|kit|effect)\/(\d+)(\/lab|\/browse)?$/);
   if (m && !isReload) {
     const tabKey = Object.keys(TAB_DEF).find((k) => TAB_DEF[k].type === m[1]);
     if (tabKey && tabKey !== state.tab) {
@@ -1198,7 +1296,14 @@ async function boot(isReload) {
     select(m[1], Number(m[2]));
     if (m[3] && m[1] === 'effect') {
       const eff = rec('SpellVisualEffectName', Number(m[2]));
-      if (eff) openLab(eff);
+      if (eff && m[3] === '/lab') openLab(eff);
+      else if (eff) {
+        openModelBrowser((path) => {
+          eff.FileName = path;
+          scheduleSave('SpellVisualEffectName', eff);
+          renderEditor();
+        });
+      }
     }
   }
 }

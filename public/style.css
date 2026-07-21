@@ -168,6 +168,39 @@ details.adv > summary { cursor: pointer; color: var(--muted); font-size: 12px; p
 .preview-foot { display: flex; flex-wrap: wrap; gap: 8px 16px; padding: 6px 12px; font-size: 12px; color: var(--muted); border-top: 1px solid var(--border); }
 .preview-foot label { display: flex; align-items: center; gap: 5px; }
 
+/* model browser modal */
+.modal-backdrop {
+  position: fixed; inset: 0; background: rgba(0, 0, 0, .55); z-index: 40;
+  display: flex; align-items: center; justify-content: center;
+}
+.modal {
+  background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius);
+  width: min(680px, 92vw); max-height: 82vh; display: flex; flex-direction: column;
+  box-shadow: 0 12px 48px rgba(0,0,0,.6);
+}
+.modal-head { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--border); }
+.modal-toolbar { display: flex; gap: 8px; padding: 10px 14px; }
+.modal-toolbar input {
+  flex: 1; background: var(--bg); color: var(--text); border: 1px solid var(--border);
+  border-radius: 6px; padding: 6px 10px; font: inherit;
+}
+.modal-toolbar input:focus { outline: none; border-color: var(--accent2); }
+.modal-toolbar select {
+  background: var(--bg); color: var(--text); border: 1px solid var(--border);
+  border-radius: 6px; padding: 6px 8px; font: inherit; font-size: 13px; max-width: 200px;
+}
+.model-list { flex: 1; overflow-y: auto; min-height: 200px; }
+.model-row {
+  display: flex; gap: 10px; align-items: baseline; padding: 4px 14px; cursor: pointer;
+  border-left: 3px solid transparent;
+}
+.model-row:hover { background: var(--bg3); }
+.model-row.selected { background: var(--bg3); border-left-color: var(--accent); }
+.model-row .nm { flex: 1; font-size: 12px; overflow-wrap: anywhere; }
+.model-row .sub { font-size: 11px; color: var(--muted); white-space: nowrap; }
+.modal-foot { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-top: 1px solid var(--border); }
+.mono { font-family: var(--mono); }
+
 #toast {
   position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
   background: var(--bg3); border: 1px solid var(--accent); color: var(--text);

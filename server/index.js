@@ -295,6 +295,57 @@ route('GET', /^\/api\/export-patch$/, (req, res) => {
   res.end(archive);
 });
 
+// Browse every model available to the client: loose files under gamedata plus
+// all models enumerated from the MPQ archive chain (via their listfiles).
+route('GET', /^\/api\/models$/, (req, res, m, url) => {
+  const q = (url.searchParams.get('q') || '').toLowerCase();
+  const dir = (url.searchParams.get('dir') || '').toLowerCase();
+  const offset = Number(url.searchParams.get('offset')) || 0;
+  const limit = Math.min(Number(url.searchParams.get('limit')) || 200, 1000);
+
+  // loose files take resolution priority — list them first
+  const loose = [];
+  const walk = (d, rel) => {
+    for (const entry of fs.readdirSync(d)) {
+      const full = path.join(d, entry);
+      const st = fs.statSync(full);
+      const vname = rel ? `${rel}\\${entry}` : entry;
+      if (st.isDirectory()) {
+        if (entry.toLowerCase() === 'data') continue;
+        walk(full, vname);
+      } else if (/\.(m2|mdx|mdl)$/i.test(entry)) {
+        loose.push({ path: vname, archive: 'loose file', size: st.size });
+      }
+    }
+  };
+  if (fs.existsSync(GAMEDATA_DIR)) walk(GAMEDATA_DIR, '');
+  const looseKeys = new Set(loose.map((f) => f.path.toLowerCase()));
+  const all = [...loose, ...mpq.listModels().filter((f) => !looseKeys.has(f.path.toLowerCase()))];
+
+  // top-level folder facets over the full set
+  const dirCounts = new Map();
+  for (const f of all) {
+    const top = f.path.split('\\')[0].toLowerCase();
+    dirCounts.set(top, (dirCounts.get(top) || 0) + 1);
+  }
+  const dirs = [...dirCounts.entries()]
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count);
+
+  const matches = all.filter((f) => {
+    const p = f.path.toLowerCase();
+    if (dir && !p.startsWith(dir + '\\')) return false;
+    if (q && !p.includes(q)) return false;
+    return true;
+  });
+  sendJson(res, 200, {
+    total: matches.length,
+    offset,
+    dirs,
+    records: matches.slice(offset, offset + limit),
+  });
+});
+
 // Decoded BLP texture as raw RGBA bytes (dimensions in headers).
 route('GET', /^\/api\/texture$/, (req, res, m, url) => {
   const vpath = url.searchParams.get('path');
