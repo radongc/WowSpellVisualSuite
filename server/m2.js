@@ -87,17 +87,25 @@ function parseM2(buf) {
   const positions = new Array(vertices.count * 3);
   const normals = new Array(vertices.count * 3);
   const uvs = new Array(vertices.count * 2);
+  const boneWeights = new Array(vertices.count * 4);
+  const boneIndices = new Array(vertices.count * 4);
   for (let i = 0; i < vertices.count; i++) {
     const o = vertices.offset + i * VSTRIDE;
     positions[i * 3] = buf.readFloatLE(o);
     positions[i * 3 + 1] = buf.readFloatLE(o + 4);
     positions[i * 3 + 2] = buf.readFloatLE(o + 8);
+    for (let b = 0; b < 4; b++) {
+      boneWeights[i * 4 + b] = buf.readUInt8(o + 12 + b) / 255;
+      boneIndices[i * 4 + b] = buf.readUInt8(o + 16 + b);
+    }
     normals[i * 3] = buf.readFloatLE(o + 20);
     normals[i * 3 + 1] = buf.readFloatLE(o + 24);
     normals[i * 3 + 2] = buf.readFloatLE(o + 28);
     uvs[i * 2] = buf.readFloatLE(o + 32);
     uvs[i * 2 + 1] = buf.readFloatLE(o + 36);
   }
+
+  const skeleton = parseSkeleton(buf, arr);
 
   // M2View (<= TBC): indices, triangles, properties, submeshes, textureUnits (M2Arrays), lod
   const VIEW_SIZE = 44;
@@ -172,7 +180,85 @@ function parseM2(buf) {
     batches = [];
   }
 
-  return { name, version, vertexCount: vertices.count, positions, normals, uvs, indices, textures, batches, particles, attachments };
+  return {
+    name, version, vertexCount: vertices.count, positions, normals, uvs, indices,
+    textures, batches, particles, attachments,
+    boneWeights: skeleton ? boneWeights : undefined,
+    boneIndices: skeleton ? boneIndices : undefined,
+    skeleton,
+  };
+}
+
+// --- skeleton: sequences (vanilla 68-byte, global-timeline start/end), bones
+// (0x6C: keyBone u32, flags u32, parent s16, submesh u16, 3 tracks, pivot),
+// global sequence durations. Tracks are vanilla flat single-timeline arrays. ---
+function parseSkeleton(buf, arr) {
+  try {
+    const boneArr = arr(0x34);
+    const seqArr = arr(0x1C);
+    if (boneArr.count === 0 || boneArr.count > 512) return null;
+    if (boneArr.offset + boneArr.count * 0x6C > buf.length) return null;
+
+    const globalSeqs = [];
+    const gsArr = arr(0x14);
+    if (gsArr.count < 64 && gsArr.offset + gsArr.count * 4 <= buf.length) {
+      for (let i = 0; i < gsArr.count; i++) globalSeqs.push(buf.readUInt32LE(gsArr.offset + i * 4));
+    }
+
+    const sequences = [];
+    if (seqArr.count > 0 && seqArr.count <= 4096 && seqArr.offset + seqArr.count * 68 <= buf.length) {
+      for (let i = 0; i < seqArr.count; i++) {
+        const o = seqArr.offset + i * 68;
+        sequences.push({
+          id: buf.readUInt16LE(o),
+          variationIndex: buf.readUInt16LE(o + 2),
+          start: buf.readUInt32LE(o + 4),
+          end: buf.readUInt32LE(o + 8),
+          flags: buf.readUInt32LE(o + 0x10),
+        });
+      }
+      if (sequences.some((s) => s.end < s.start)) throw new Error('sequences failed validation');
+    }
+
+    const track = (o, dim) => {
+      const interp = buf.readUInt16LE(o);
+      const count = buf.readUInt32LE(o + 0x0C);
+      const tOfs = buf.readUInt32LE(o + 0x10);
+      const vCount = buf.readUInt32LE(o + 0x14);
+      const vOfs = buf.readUInt32LE(o + 0x18);
+      const n = Math.min(count, vCount);
+      if (n === 0) return null;
+      if (n > 200000 || tOfs + n * 4 > buf.length || vOfs + n * dim * 4 > buf.length) throw new Error('track out of bounds');
+      const times = new Array(n);
+      const values = new Array(n * dim);
+      for (let i = 0; i < n; i++) times[i] = buf.readUInt32LE(tOfs + i * 4);
+      for (let i = 0; i < n * dim; i++) {
+        const v = buf.readFloatLE(vOfs + i * 4);
+        values[i] = Number.isFinite(v) ? v : 0;
+      }
+      return { interp, gseq: buf.readInt16LE(o + 2), times, values };
+    };
+
+    const bones = [];
+    for (let i = 0; i < boneArr.count; i++) {
+      const o = boneArr.offset + i * 0x6C;
+      const parent = buf.readInt16LE(o + 8);
+      if (parent >= boneArr.count) throw new Error('bone parent out of range');
+      bones.push({
+        flags: buf.readUInt32LE(o + 4),
+        parent,
+        trans: track(o + 0x0C, 3),
+        rot: track(o + 0x28, 4),
+        scale: track(o + 0x44, 3),
+        pivot: [buf.readFloatLE(o + 0x60), buf.readFloatLE(o + 0x64), buf.readFloatLE(o + 0x68)],
+      });
+    }
+    const animated = bones.some((b) => b.trans || b.rot || b.scale);
+    if (!animated && !sequences.length) return null;
+    return { bones, sequences, globalSeqs };
+  } catch (e) {
+    return null;
+  }
 }
 
 // Vanilla M2ParticleOld (504 bytes). Track values are sampled at their first

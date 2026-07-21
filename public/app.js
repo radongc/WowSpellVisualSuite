@@ -295,7 +295,8 @@ function numField(record, table, field, label, opts = {}) {
     },
   });
   const sub = opts.subtext ? el('div', { class: 'subtext' }, opts.subtext) : null;
-  return el('div', { class: 'fld' + (opts.wide ? ' wide' : '') }, el('label', {}, label), input, sub);
+  return el('div', { class: 'fld' + (opts.wide ? ' wide' : '') },
+    el('label', {}, label, opts.labelExtra ? ' ' : null, opts.labelExtra || null), input, sub);
 }
 
 function textField(record, table, field, label, opts = {}) {
@@ -522,7 +523,10 @@ function renderVisualBody(content, v, compact) {
       refField(v, 'SpellVisual', 'MissileModel', 'Missile model', REFS.effect, { after: (val) => previewEffectId(val) }),
       selectField(v, 'SpellVisual', 'MissilePathType', 'Path type', Object.entries(PATH_TYPES)),
       selectField(v, 'SpellVisual', 'MissileDestinationAttachment', 'Destination attachment', Object.entries(ATTACH_POINTS)),
-      numField(v, 'SpellVisual', 'MissileSound', 'Missile sound', { subtext: soundLabel(v.MissileSound) }),
+      numField(v, 'SpellVisual', 'MissileSound', 'Missile sound', {
+        subtext: soundLabel(v.MissileSound),
+        labelExtra: soundPlayButton(v, 'MissileSound'),
+      }),
       numField(v, 'SpellVisual', 'MissileAttachment', 'Missile attachment'))));
 
   // area + misc
@@ -532,7 +536,10 @@ function renderVisualBody(content, v, compact) {
       boolField(v, 'SpellVisual', 'HasAreaEffect', 'Has area effect'),
       refField(v, 'SpellVisual', 'AreaModel', 'Area model', REFS.effect, { after: (val) => previewEffectId(val) }),
       refField(v, 'SpellVisual', 'AreaKit', 'Area kit (duplicate slot)', REFS.kit),
-      numField(v, 'SpellVisual', 'AnimEventSoundID', 'Anim event sound', { subtext: soundLabel(v.AnimEventSoundID) }))));
+      numField(v, 'SpellVisual', 'AnimEventSoundID', 'Anim event sound', {
+        subtext: soundLabel(v.AnimEventSoundID),
+        labelExtra: soundPlayButton(v, 'AnimEventSoundID'),
+      }))));
 }
 
 // --- kit editor ---
@@ -563,10 +570,11 @@ function renderKitEditor(content, id) {
     el('h3', {}, 'Animation & sound'),
     el('div', { class: 'field-grid' },
       numField(k, 'SpellVisualKit', 'KitType', 'Kit type'),
-      numField(k, 'SpellVisualKit', 'AnimID', 'Animation', {
-        subtext: k.AnimID >= 0 && ANIM_NAMES[k.AnimID] ? ANIM_NAMES[k.AnimID] : (k.AnimID === -1 ? 'none' : 'anim ID (AnimationData)'),
+      numField(k, 'SpellVisualKit', 'AnimID', 'Animation', { subtext: animLabel(k.AnimID) }),
+      numField(k, 'SpellVisualKit', 'SoundID', 'Sound', {
+        subtext: soundLabel(k.SoundID),
+        labelExtra: soundPlayButton(k, 'SoundID'),
       }),
-      numField(k, 'SpellVisualKit', 'SoundID', 'Sound', { subtext: soundLabel(k.SoundID) }),
       shakeField(k))));
 
   // attachment effect slots
@@ -649,7 +657,28 @@ function shakeField(k) {
 function soundLabel(id) {
   if (!id || id <= 0) return 'none';
   const s = rec('SoundEntries', id);
-  return s ? s.Name : `SoundEntries #${id} (drop SoundEntries.dbc into /dbc for names)`;
+  return s ? s.Name : `SoundEntries #${id}`;
+}
+
+function animLabel(id) {
+  if (id === -1) return 'none';
+  const a = rec('AnimationData', id);
+  return a ? a.Name : (ANIM_NAMES[id] || `anim ${id}`);
+}
+
+// ▶ button that auditions whichever sound id the record field currently holds
+let currentAudio = null;
+function soundPlayButton(record, field) {
+  return el('button', {
+    class: 'linkbtn', title: 'Play this sound',
+    onclick: () => {
+      const id = record[field];
+      if (!id || id <= 0) return toast('No sound set.');
+      if (currentAudio) { currentAudio.pause(); currentAudio = null; }
+      currentAudio = new Audio(`/api/sound/${id}`);
+      currentAudio.play().catch((e) => toast(`Could not play sound #${id}: ${e.message}`, true));
+    },
+  }, '▶');
 }
 
 // --- effect editor ---
@@ -799,6 +828,7 @@ async function loadLabScene() {
       { geom: my.charGeom, gray: true, noParticles: true },
       { geom: my.effectGeom, transform: labTransform() },
     ]);
+    populateAnimSelect(my.charGeom); // footer anim selector drives the mannequin
     // effect textures (model index 1)
     (my.effectGeom.textures || []).forEach(async (t, i) => {
       if (!t.fileName) return;
@@ -1036,6 +1066,23 @@ async function previewEffectId(id) {
   await previewModelPath(e.FileName, { seq, keepTitle: true });
 }
 
+// Fill the preview footer's animation selector for scene model 0.
+function populateAnimSelect(geom) {
+  const lbl = $('#lbl-anim'), sel = $('#sel-anim');
+  const seqs = geom && geom.skeleton && geom.skeleton.sequences || [];
+  if (!seqs.length) { lbl.hidden = true; sel.textContent = ''; return; }
+  sel.textContent = '';
+  sel.append(el('option', { value: -1 }, 'bind pose'));
+  seqs.forEach((s, i) => {
+    const o = el('option', { value: i },
+      `${animLabel(s.id)}${s.variationIndex ? ` #${s.variationIndex}` : ''} (${((s.end - s.start) / 1000).toFixed(1)}s)`);
+    sel.append(o);
+  });
+  sel.value = String(Viewer.getAnimation(0));
+  sel.onchange = () => Viewer.setAnimation(0, Number(sel.value));
+  lbl.hidden = false;
+}
+
 // Load + show a model by raw game path (shared by effect preview and the browser).
 async function previewModelPath(filePath, opts = {}) {
   const seq = opts.seq != null ? opts.seq : ++previewSeq;
@@ -1057,10 +1104,12 @@ async function previewModelPath(filePath, opts = {}) {
     }
     Viewer.show(geom);
     setOverlay(null);
+    populateAnimSelect(geom);
     const texNames = (geom.textures || []).map((t) => t.fileName).filter(Boolean);
     const parts = [];
     if (geom.vertexCount) parts.push(`${geom.vertexCount} verts / ${geom.indices.length / 3} tris`);
     if (emitters) parts.push(`${emitters} emitter${emitters > 1 ? 's' : ''}`);
+    if (geom.skeleton && geom.skeleton.sequences.length) parts.push(`${geom.skeleton.sequences.length} anims`);
     if (texNames.length) parts.push(`${texNames.length} tex`);
     stats.textContent = parts.join(' / ');
     msg.textContent = `${filePath} → ${geom.file}${geom.particleOnly ? ' (particles only — approximate preview)' : ''}`;
@@ -1110,14 +1159,170 @@ function previewForVisualId(vid) {
 
 // ---------- toolbar actions ----------
 
-$('#btn-save').addEventListener('click', async () => {
+$('#btn-save').addEventListener('click', () => openFileDialog());
+
+// Discard in-memory edits to specific tables (server reloads them from
+// disk/archives), then refresh everything client-side.
+async function discardTables(names, closeDialog) {
   try {
-    const res = await api('/api/save', { method: 'POST' });
-    if (res.saved.length === 0) toast('Nothing to save.');
-    else toast(`Saved ${res.saved.join(', ')} (backup in ${res.backupDir})`);
-    refreshStatus();
-  } catch (e) { toast('Save failed: ' + e.message, true); }
-});
+    const r = await api('/api/discard', { method: 'POST', body: { tables: names } });
+    for (const n of r.discarded) {
+      if (state.tables[n]) await loadTable(n);
+    }
+    buildDatalists();
+    await refreshStatus();
+    renderList();
+    renderEditor();
+    if (closeDialog) closeDialog();
+    if (r.failed.length) {
+      toast(`Discarded ${r.discarded.join(', ') || 'nothing'}; failed: ${r.failed.map((f) => `${f.name} (${f.error})`).join(', ')}`, true);
+    } else {
+      toast(`Discarded changes to ${r.discarded.join(', ')}.`);
+    }
+  } catch (e) {
+    toast('Discard failed: ' + e.message, true);
+  }
+}
+
+// ---------- save / export dialog ----------
+
+async function openFileDialog() {
+  await refreshStatus();
+  const dirty = (state.status && state.status.dirty) || [];
+  const tables = (state.status && state.status.tables) || {};
+  const loaded = Object.keys(tables).filter((n) => tables[n].state === 'ok');
+
+  const backdrop = el('div', { class: 'modal-backdrop', onclick: (e) => { if (e.target === backdrop) close(); } });
+  function close() {
+    backdrop.remove();
+    document.removeEventListener('keydown', onKey);
+  }
+  function onKey(e) { if (e.key === 'Escape') close(); }
+  document.addEventListener('keydown', onKey);
+
+  const section = (title, hint, ...children) => el('div', { class: 'dlg-section' },
+    el('h3', {}, title),
+    hint ? el('div', { class: 'sub dlg-hint' }, hint) : null,
+    ...children);
+
+  // --- section: save to project dbc/ folder ---
+  const saveBtn = el('button', {
+    class: 'primary', disabled: dirty.length === 0,
+    onclick: async () => {
+      if (!confirm(`Overwrite ${dirty.length} file(s) in the project dbc/ folder?\n\n${dirty.map((d) => d + '.dbc').join('\n')}\n\nThe current files are backed up to dbc/backup/<timestamp>/ first.`)) return;
+      try {
+        const r = await api('/api/save', { method: 'POST' });
+        toast(`Saved ${r.saved.join(', ')} (backup: ${r.backupDir})`);
+        refreshStatus();
+        close();
+      } catch (e2) { toast('Save failed: ' + e2.message, true); }
+    },
+  }, dirty.length ? `Save ${dirty.length} modified table(s) to dbc/` : 'No unsaved changes');
+
+  const discardAllBtn = el('button', {
+    class: 'danger', disabled: dirty.length === 0, style: 'margin-left:8px',
+    onclick: () => {
+      if (!confirm(`Discard ALL unsaved changes?\n\n${dirty.map((d) => d + '.dbc').join('\n')}\n\nEach table is reloaded from its last saved state. This cannot be undone.`)) return;
+      discardTables(dirty, close);
+    },
+  }, dirty.length ? `Discard all changes` : 'Nothing to discard');
+
+  // --- section: download DBCs ---
+  const dbcRows = loaded.map((n) => el('div', { class: 'dlg-row' },
+    el('span', { class: 'nm mono' }, `${n}.dbc`),
+    dirty.includes(n) ? el('span', { class: 'dlg-dirty' }, '● modified') : el('span', { class: 'sub' }, 'unchanged'),
+    el('span', { class: 'sub' }, `${tables[n].recordCount} records`),
+    dirty.includes(n) ? el('button', {
+      class: 'linkbtn', title: 'Throw away edits to this table and reload its last saved state',
+      onclick: () => {
+        if (confirm(`Discard unsaved changes to ${n}.dbc? This cannot be undone.`)) discardTables([n], close);
+      },
+    }, 'discard') : null,
+    el('a', { class: 'linkbtn', href: `/api/export/dbc/${n}`, download: '' }, 'download')));
+  const dirtySorted = [...dbcRows].sort((a, b) =>
+    (b.querySelector('.dlg-dirty') ? 1 : 0) - (a.querySelector('.dlg-dirty') ? 1 : 0));
+
+  // --- section: custom game files ---
+  const looseList = el('div', {}, el('span', { class: 'sub' }, 'Loading…'));
+  api('/api/loose-files').then((r) => {
+    looseList.textContent = '';
+    if (!r.files.length) {
+      looseList.append(el('span', { class: 'sub' }, 'None yet — baked models from the attachment lab will appear here.'));
+      return;
+    }
+    for (const f of r.files) {
+      looseList.append(el('div', { class: 'dlg-row' },
+        el('span', { class: 'nm mono' }, f.path),
+        el('span', { class: 'sub' }, `${(f.size / 1024).toFixed(0)} KB`),
+        el('a', { class: 'linkbtn', href: `/api/export/file?path=${encodeURIComponent(f.path)}`, download: '' }, 'download')));
+    }
+    looseList.append(el('div', { style: 'margin-top:8px' },
+      el('a', { class: 'linkbtn', href: '/api/export/zip?files=all', download: '' },
+        '⬇ Download all as ZIP (folder structure preserved — drag contents into Ladik’s MPQ Editor)')));
+  }).catch((e2) => { looseList.textContent = `Failed to list: ${e2.message}`; });
+
+  // --- section: patch MPQ ---
+  const chkDbc = el('input', { type: 'checkbox', checked: '' });
+  const patchLink = el('a', { class: 'linkbtn', href: '/api/export-patch?dbc=1', download: '' }, '⬇ Download patch-3.MPQ');
+  chkDbc.addEventListener('change', () => {
+    patchLink.href = chkDbc.checked ? '/api/export-patch?dbc=1' : '/api/export-patch';
+  });
+
+  // --- section: import ---
+  const importInput = el('input', { type: 'file', accept: '.dbc', multiple: '', style: 'display:none' });
+  importInput.addEventListener('change', async () => {
+    for (const file of importInput.files) {
+      const name = file.name.replace(/\.dbc$/i, '');
+      if (!confirm(`Import "${file.name}" (${(file.size / 1024).toFixed(0)} KB)?\n\nThis validates the file against the 1.12.1 ${name} schema, backs up the current dbc/${name}.dbc, then replaces it.`)) continue;
+      try {
+        const buf = await file.arrayBuffer();
+        const r = await fetch(`/api/import/dbc?name=${encodeURIComponent(name)}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/octet-stream' },
+          body: buf,
+        });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error || r.statusText);
+        toast(`Imported ${name}.dbc — ${data.recordCount} records.`);
+      } catch (e2) {
+        toast(`Import of ${file.name} failed: ${e2.message}`, true);
+      }
+    }
+    importInput.value = '';
+    close();
+    await boot(true);
+  });
+
+  const modal = el('div', { class: 'modal dlg' },
+    el('div', { class: 'modal-head' },
+      el('b', {}, 'Save / Export / Import'),
+      el('span', { class: 'sub' }, dirty.length ? ` ${dirty.length} table(s) with unsaved changes` : ' no unsaved changes'),
+      el('span', { class: 'spacer' }),
+      el('button', { onclick: close }, '✕')),
+    el('div', { class: 'dlg-body' },
+      section('Save to project (dbc/ folder)',
+        'Writes your edits over the .dbc files this editor loaded from. A timestamped backup of the originals is created first. Nothing is written to disk until you do this. Discarding reloads the last saved state instead.',
+        saveBtn, discardAllBtn),
+      section('Download DBC files',
+        'Downloads reflect your current edits without touching any files on disk. For the client, DBCs belong in DBFilesClient\\ inside a patch MPQ.',
+        el('div', { class: 'dlg-list' }, ...dirtySorted),
+        el('div', { style: 'margin-top:8px' },
+          el('a', { class: 'linkbtn', href: '/api/export/zip?dbc=dirty', download: '', hidden: dirty.length === 0 },
+            '⬇ Download modified DBCs as ZIP (DBFilesClient/ structure)'))),
+      section('Custom game files (baked models)',
+        'Raw files with their correct in-game paths, ready for manual MPQ editing.',
+        looseList),
+      section('Client patch MPQ',
+        'One ready-to-ship archive for your players.',
+        el('label', { class: 'checkrow', style: 'margin-bottom:6px' }, chkDbc, ' include modified DBCs (DBFilesClient\\)'),
+        patchLink),
+      section('Import DBC files',
+        'Replace a project DBC with a file from elsewhere (e.g. a Spell.dbc edited in another tool). Validated against the 1.12.1 layout before anything is overwritten; the old file is backed up.',
+        el('button', { onclick: () => importInput.click() }, 'Choose .dbc files…'),
+        importInput)));
+  backdrop.append(modal);
+  document.body.append(backdrop);
+}
 
 $('#btn-reload').addEventListener('click', async () => {
   if (state.status && state.status.dirty.length &&
@@ -1254,6 +1459,7 @@ async function boot(isReload) {
     loadTable('SpellVisualEffectName'),
     loadTable('SpellEffectCameraShakes'),
     loadTable('SoundEntries'),
+    loadTable('AnimationData'),
   ]);
   buildDatalists();
 
@@ -1284,6 +1490,8 @@ async function boot(isReload) {
   if (!isReload) renderList();
   else { renderList(); renderEditor(); }
 
+  // deep link: #files opens the save/export dialog
+  if (location.hash === '#files' && !isReload) openFileDialog();
   // deep link: #visual/4, #kit/8, #effect/2, #spell/133, #effect/716/lab, #effect/2/browse
   const m = location.hash.match(/^#(spell|visual|kit|effect)\/(\d+)(\/lab|\/browse)?$/);
   if (m && !isReload) {

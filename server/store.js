@@ -158,6 +158,56 @@ class Store {
     return Object.keys(this.tables).filter((n) => this.tables[n].dirty);
   }
 
+  // Load a table from an in-memory buffer (e.g. a DBC read straight out of the
+  // client's MPQ archives). Used to auto-fill tables missing from dbc/.
+  loadFromBuffer(name, buf, source) {
+    const { records } = dbc.parse(buf, SCHEMAS[name], name);
+    const byId = new Map(records.map((r) => [r.ID, r]));
+    this.tables[name] = { records, byId, dirty: false };
+    this.status[name] = { state: 'ok', recordCount: records.length, source };
+  }
+
+  // Drop in-memory edits to one table by re-reading it from dbc/. Returns false
+  // if there is no disk file (caller may fall back to the MPQ chain).
+  reloadTable(name) {
+    if (!SCHEMAS[name]) throw new Error(`unknown table ${name}`);
+    const file = path.join(DBC_DIR, name + '.dbc');
+    if (!fs.existsSync(file)) return false;
+    const { records } = dbc.parse(fs.readFileSync(file), SCHEMAS[name], name);
+    const byId = new Map(records.map((r) => [r.ID, r]));
+    this.tables[name] = { records, byId, dirty: false };
+    this.status[name] = { state: 'ok', recordCount: records.length };
+    return true;
+  }
+
+  // Serialize the current in-memory state of a table to WDBC bytes without
+  // touching the files on disk (used by the export dialog).
+  serializeTable(name) {
+    const t = this.tables[name];
+    if (!t) throw new Error(`table ${name} not loaded`);
+    const sorted = [...t.records].sort((a, b) => a.ID - b.ID);
+    return dbc.write(sorted, SCHEMAS[name], name);
+  }
+
+  // Validate and install an uploaded .dbc: parse against the schema first, back
+  // up the existing file, write, and reload the table into memory.
+  importTable(name, buf) {
+    if (!SCHEMAS[name]) throw new Error(`unknown table ${name}`);
+    const { records } = dbc.parse(buf, SCHEMAS[name], name); // throws if invalid
+    const file = path.join(DBC_DIR, name + '.dbc');
+    if (fs.existsSync(file)) {
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const backupDir = path.join(BACKUP_DIR, stamp);
+      fs.mkdirSync(backupDir, { recursive: true });
+      fs.copyFileSync(file, path.join(backupDir, name + '.dbc'));
+    }
+    fs.writeFileSync(file, buf);
+    const byId = new Map(records.map((r) => [r.ID, r]));
+    this.tables[name] = { records, byId, dirty: false };
+    this.status[name] = { state: 'ok', recordCount: records.length };
+    return { recordCount: records.length };
+  }
+
   // Writes dirty tables to disk; originals are copied to dbc/backup/<timestamp>/ first.
   save() {
     const dirty = this.dirtyTables();

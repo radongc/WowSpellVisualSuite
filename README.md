@@ -22,16 +22,38 @@ Then open **http://localhost:3414** (set `PORT` to change).
 - Create, clone, and delete records; jump between references; see reverse usage.
 - **Deep-clone a whole visual chain** in one click (spell → visual → kits → effects, all
   references rewired to the new copies) — no manual multi-table editing.
-- 3D preview of effect models (see *Game data* below).
+- 3D preview of effect models (see *Game data* below), with a **model browser**
+  (effect editor → "browse…") to search every model in your archives, preview each in 3D,
+  and pick one — instead of typing a raw path.
+- **Animation playback**: full vanilla M2 skeletal animation (bone tracks, CPU skinning,
+  billboard bones) — spell models auto-play their effect loop, and the preview footer has
+  an animation selector (mannequins play Stand by default in the attachment lab).
+- **Reference data from your archives**: AnimationData and SoundEntries load straight out
+  of the client MPQs, so animations and sounds show real names — and every sound field has
+  a ▶ button to audition it.
 - **Attachment lab** (effect editor → "Position on character…"): preview any effect model
   attached to a race/gender mannequin at a real attachment point, drag it into place
-  (shift+drag) or set XYZ/yaw/pitch/roll/scale, then **bake** the transform into a copy of
-  the M2. 1.12 has no offset fields in DBC — position lives in the model file (that's how
-  the WSG flag sits on the back while being a ChestEffect) — so the baked model is the
-  1.12-correct way to reposition a visual. "Download patch MPQ" packs every baked file
-  into a client-ready archive (with `(listfile)`).
-- Edits are applied to server memory as you type; **Save DBCs** writes the files to disk.
-  Every save copies the originals to `dbc/backup/<timestamp>/` first.
+  (axis-gizmo arrows, shift+drag, or XYZ/yaw/pitch/roll/scale fields), then **bake** the
+  transform into a copy of the M2. 1.12 has no offset fields in DBC — position lives in the
+  model file (that's how the WSG flag sits on the back while being a ChestEffect) — so the
+  baked model is the 1.12-correct way to reposition a visual.
+
+## Saving, exporting, importing
+
+Nothing touches disk until you ask. Edits live in server memory; the **Save / Export…**
+dialog (top bar) is the single place for all file operations:
+
+- **Save to project** — overwrite the `.dbc` files in [dbc/](dbc/); originals are copied to
+  `dbc/backup/<timestamp>/` first. Confirms before overwriting.
+- **Download DBC files** — each table (reflecting your current edits) as a `.dbc`, or a ZIP
+  of just the modified ones laid out under `DBFilesClient/`. Never writes to disk.
+- **Custom game files** — every baked model listed with its correct in-game path; download
+  individually or as a ZIP with folder structure preserved (drag straight into Ladik's MPQ
+  Editor).
+- **Client patch MPQ** — one `patch-3.MPQ` with your custom models, optionally including the
+  modified DBCs under `DBFilesClient\`.
+- **Import DBC** — replace a project DBC with one edited elsewhere; validated against the
+  1.12.1 layout before anything is overwritten, old file backed up.
 
 ## Data notes
 

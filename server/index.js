@@ -9,6 +9,7 @@ const { parseM2 } = require('./m2');
 const { bakeM2 } = require('./m2bake');
 const { decodeBLP } = require('./blp');
 const { buildMpq } = require('./mpqwrite');
+const { buildZip } = require('./zipwrite');
 const mpq = require('./mpq');
 
 const PORT = Number(process.env.PORT) || 3414;
@@ -171,12 +172,65 @@ route('POST', /^\/api\/save$/, (req, res) => {
   sendJson(res, 200, result);
 });
 
+// Any table missing from dbc/ is filled from the client's archives — this is
+// how AnimationData/SoundEntries names light up without manual exports.
+function loadTablesFromArchives() {
+  for (const name of Object.keys(SCHEMAS)) {
+    if (store.status[name] && store.status[name].state === 'ok') continue;
+    const hit = mpq.readFile(`DBFilesClient\\${name}.dbc`);
+    if (!hit) continue;
+    try {
+      store.loadFromBuffer(name, hit.data, hit.archive);
+    } catch (e) { /* keep the original missing/error status */ }
+  }
+}
+
+// Discard in-memory edits: reload the named tables (or all dirty ones) from
+// disk, falling back to the MPQ chain for archive-sourced tables.
+route('POST', /^\/api\/discard$/, async (req, res) => {
+  const body = await readBody(req);
+  const targets = body.all ? store.dirtyTables()
+    : Array.isArray(body.tables) ? body.tables.filter((n) => /^\w+$/.test(n)) : [];
+  const discarded = [], failed = [];
+  for (const name of targets) {
+    try {
+      if (store.reloadTable(name)) { discarded.push(name); continue; }
+      const hit = mpq.readFile(`DBFilesClient\\${name}.dbc`);
+      if (hit) {
+        store.loadFromBuffer(name, hit.data, hit.archive);
+        discarded.push(name);
+      } else {
+        failed.push({ name, error: 'no disk file or archive copy to reload from' });
+      }
+    } catch (e) {
+      failed.push({ name, error: e.message });
+    }
+  }
+  sendJson(res, 200, { discarded, failed, dirty: store.dirtyTables() });
+});
+
 route('POST', /^\/api\/reload$/, async (req, res) => {
   store.tables = {};
   store.status = {};
   store.load();
   await mpq.init(GAMEDATA_DIR);
+  loadTablesFromArchives();
   sendJson(res, 200, { ok: true, tables: store.status, mpq: mpq.list() });
+});
+
+// Audition a SoundEntries record: serves one of its files from the archives.
+route('GET', /^\/api\/sound\/(\d+)$/, (req, res, m) => {
+  const rec = store.getRecord('SoundEntries', Number(m[1]));
+  if (!rec) return sendJson(res, 404, { error: `SoundEntries #${m[1]} not loaded/found` });
+  const files = rec.File.filter(Boolean);
+  if (!files.length) return sendJson(res, 404, { error: 'sound entry has no files' });
+  const pick = files[Math.floor(Math.random() * files.length)];
+  const vpath = rec.DirectoryBase ? `${rec.DirectoryBase.replace(/[\\/]+$/, '')}\\${pick}` : pick;
+  const hit = readGameFile(vpath);
+  if (!hit) return sendJson(res, 404, { error: `sound file not found: ${vpath}` });
+  const type = /\.mp3$/i.test(pick) ? 'audio/mpeg' : 'audio/wav';
+  res.writeHead(200, { 'Content-Type': type, 'Content-Length': String(hit.data.length), 'Cache-Control': 'max-age=300' });
+  res.end(hit.data);
 });
 
 // 3D preview geometry for a model referenced by SpellVisualEffectName.FileName.
@@ -221,6 +275,103 @@ route('GET', /^\/api\/model$/, (req, res, m, url) => {
     });
   }
   sendJson(res, 404, { error: `model not found in ${archives.length} archive(s) or loose files: ${vpath}`, archives });
+});
+
+function readRawBody(req, maxBytes = 80 * 1024 * 1024) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > maxBytes) { reject(new Error('body too large')); req.destroy(); return; }
+      chunks.push(c);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
+// All loose (non-archive) files under gamedata, with virtual paths.
+function listLooseFiles() {
+  const files = [];
+  const walk = (dir, rel) => {
+    for (const entry of fs.readdirSync(dir)) {
+      const full = path.join(dir, entry);
+      const st = fs.statSync(full);
+      const vname = rel ? `${rel}\\${entry}` : entry;
+      if (st.isDirectory()) {
+        if (entry.toLowerCase() === 'data') continue;
+        walk(full, vname);
+      } else if (!/\.mpq$/i.test(entry)) {
+        files.push({ path: vname, size: st.size, full });
+      }
+    }
+  };
+  if (fs.existsSync(GAMEDATA_DIR)) walk(GAMEDATA_DIR, '');
+  return files;
+}
+
+function sendDownload(res, filename, data) {
+  res.writeHead(200, {
+    'Content-Type': 'application/octet-stream',
+    'Content-Disposition': `attachment; filename="${filename.replace(/"/g, '')}"`,
+    'Content-Length': String(data.length),
+  });
+  res.end(data);
+}
+
+// --- export / import ---
+
+// Current in-memory state of one table as a .dbc download (disk untouched).
+route('GET', /^\/api\/export\/dbc\/(\w+)$/, (req, res, m) => {
+  const buf = store.serializeTable(m[1]);
+  sendDownload(res, `${m[1]}.dbc`, buf);
+});
+
+// Loose custom files (baked models etc.) for the export dialog.
+route('GET', /^\/api\/loose-files$/, (req, res) => {
+  sendJson(res, 200, { files: listLooseFiles().map(({ path: p, size }) => ({ path: p, size })) });
+});
+
+route('GET', /^\/api\/export\/file$/, (req, res, m, url) => {
+  const vpath = String(url.searchParams.get('path') || '').replace(/\\/g, '/');
+  if (!vpath || vpath.includes('..')) return sendJson(res, 400, { error: 'bad path' });
+  const full = path.join(GAMEDATA_DIR, vpath);
+  if (!full.startsWith(path.resolve(GAMEDATA_DIR)) || !fs.existsSync(full) || !fs.statSync(full).isFile()) {
+    return sendJson(res, 404, { error: `not found: ${vpath}` });
+  }
+  sendDownload(res, path.basename(full), fs.readFileSync(full));
+});
+
+// ZIP bundle: ?dbc=Name1,Name2 (or "dirty") under DBFilesClient/, ?files=all
+// for every loose gamedata file with folder structure preserved.
+route('GET', /^\/api\/export\/zip$/, (req, res, m, url) => {
+  const entries = [];
+  const dbcParam = url.searchParams.get('dbc') || '';
+  const names = dbcParam === 'dirty' ? store.dirtyTables()
+    : dbcParam ? dbcParam.split(',').filter((n) => /^\w+$/.test(n)) : [];
+  for (const name of names) {
+    entries.push({ name: `DBFilesClient/${name}.dbc`, data: store.serializeTable(name) });
+  }
+  if (url.searchParams.get('files') === 'all') {
+    for (const f of listLooseFiles()) {
+      entries.push({ name: f.path.replace(/\\/g, '/'), data: fs.readFileSync(f.full) });
+    }
+  }
+  if (!entries.length) return sendJson(res, 404, { error: 'nothing selected to export' });
+  const stamp = new Date().toISOString().slice(0, 10);
+  sendDownload(res, `spell-visual-export-${stamp}.zip`, buildZip(entries));
+});
+
+// Upload a .dbc: validated against the 1.12.1 schema, existing file backed up,
+// then installed and reloaded.
+route('POST', /^\/api\/import\/dbc$/, async (req, res, m, url) => {
+  const name = String(url.searchParams.get('name') || '');
+  if (!/^\w+$/.test(name)) return sendJson(res, 400, { error: 'bad table name' });
+  const buf = await readRawBody(req);
+  if (!buf.length) return sendJson(res, 400, { error: 'empty upload' });
+  const result = store.importTable(name, buf);
+  sendJson(res, 200, { ok: true, table: name, ...result });
 });
 
 // Read any game file: loose file under gamedata first, then the MPQ chain.
@@ -268,23 +419,17 @@ route('POST', /^\/api\/bake-m2$/, async (req, res) => {
 });
 
 // Pack all loose files under gamedata/ (excluding .MPQ archives) into a fresh
-// patch archive the 1.12 client can load.
-route('GET', /^\/api\/export-patch$/, (req, res) => {
-  const files = [];
-  const walk = (dir, rel) => {
-    for (const entry of fs.readdirSync(dir)) {
-      const full = path.join(dir, entry);
-      const vname = rel ? `${rel}\\${entry}` : entry;
-      const st = fs.statSync(full);
-      if (st.isDirectory()) {
-        if (entry.toLowerCase() === 'data') continue; // nested archive dir
-        walk(full, vname);
-      } else if (!/\.mpq$/i.test(entry) && st.size < 100 * 1024 * 1024) {
-        files.push({ name: vname, data: fs.readFileSync(full) });
-      }
+// patch archive the 1.12 client can load. ?dbc=1 also embeds the current
+// in-memory Spell* DBCs under DBFilesClient\.
+route('GET', /^\/api\/export-patch$/, (req, res, m, url) => {
+  const files = listLooseFiles()
+    .filter((f) => f.size < 100 * 1024 * 1024)
+    .map((f) => ({ name: f.path, data: fs.readFileSync(f.full) }));
+  if (url.searchParams.get('dbc') === '1') {
+    for (const name of Object.keys(store.tables)) {
+      files.push({ name: `DBFilesClient\\${name}.dbc`, data: store.serializeTable(name) });
     }
-  };
-  if (fs.existsSync(GAMEDATA_DIR)) walk(GAMEDATA_DIR, '');
+  }
   if (!files.length) return sendJson(res, 404, { error: 'no loose files under gamedata to pack' });
   const archive = buildMpq(files);
   res.writeHead(200, {
@@ -405,6 +550,7 @@ const server = http.createServer(async (req, res) => {
 async function main() {
   try {
     await mpq.init(GAMEDATA_DIR);
+    loadTablesFromArchives();
   } catch (e) {
     console.log(`  !! MPQ init failed: ${e.message}`);
   }

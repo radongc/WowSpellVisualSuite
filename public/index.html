@@ -11,7 +11,7 @@
   <div class="brand">⚡ Spell Visual Editor <span class="ver">1.12.1</span></div>
   <div id="dirty-indicator" class="dirty-indicator" hidden>unsaved changes: <span id="dirty-tables"></span></div>
   <div class="spacer"></div>
-  <button id="btn-save" class="primary">Save DBCs</button>
+  <button id="btn-save" class="primary" title="Save, export, or import DBC files and custom game files">Save / Export…</button>
   <button id="btn-reload" title="Discard in-memory edits and reload all DBC files from disk">Reload from disk</button>
 </header>
 
@@ -61,6 +61,7 @@
       <label><input type="checkbox" id="chk-particles" checked> particles</label>
       <label title="Preview brightness boost">☀ <input type="range" id="rng-bright" min="0.5" max="4" step="0.1" value="2" style="width:80px"></label>
       <button id="btn-bg" class="linkbtn" title="Cycle scene background: dark / medium / light">bg: dark</button>
+      <label id="lbl-anim" hidden>anim <select id="sel-anim" style="max-width:140px"></select></label>
     </div>
   </aside>
 </div>

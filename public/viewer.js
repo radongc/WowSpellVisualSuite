@@ -14,7 +14,7 @@ const Viewer = (() => {
   const canvas = document.getElementById('gl');
   const gl = canvas.getContext('webgl', { antialias: true, alpha: false });
   if (!gl) {
-    return { show() {}, showComposite() {}, clear() {}, setTexture() {}, setModelTexture() {}, setTransform() {}, setLabDrag() {}, setWireframe() {}, setSpin() {}, setParticles() {}, setBrightness() {}, setBackground() {}, backgroundLevels: 3 };
+    return { show() {}, showComposite() {}, clear() {}, setTexture() {}, setModelTexture() {}, setTransform() {}, setLabDrag() {}, setWireframe() {}, setSpin() {}, setParticles() {}, setBrightness() {}, setBackground() {}, backgroundLevels: 3, setAnimation() {}, getAnimation() { return -1; } };
   }
   let models = [];            // [{ mesh, textures, emitters, transform, gray }]
   let sceneCenter = [0, 0, 0.5], sceneRadius = 1;
@@ -296,6 +296,168 @@ const Viewer = (() => {
     }
   }
 
+  // ---------- animation (vanilla M2 single-timeline tracks) ----------
+
+  function quatToMat3(x, y, z, w) {
+    const xx = x * x, yy = y * y, zz = z * z;
+    const xy = x * y, xz = x * z, yz = y * z;
+    const wx = w * x, wy = w * y, wz = w * z;
+    return [
+      1 - 2 * (yy + zz), 2 * (xy - wz), 2 * (xz + wy),
+      2 * (xy + wz), 1 - 2 * (xx + zz), 2 * (yz - wx),
+      2 * (xz - wy), 2 * (yz + wx), 1 - 2 * (xx + yy),
+    ]; // row-major 3x3
+  }
+
+  // sample a track at global-timeline time t clamped to [start,end]; returns array of dim
+  function sampleTrack(track, dim, t, start, end, globalSeqs, nowMs) {
+    const times = track.times, values = track.values;
+    const n = times.length;
+    if (track.gseq >= 0 && track.gseq < globalSeqs.length) {
+      const dur = Math.max(1, globalSeqs[track.gseq]);
+      t = nowMs % dur;
+      start = 0; end = dur;
+    }
+    // binary search: last key <= t
+    let lo = 0, hi = n - 1, k = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (times[mid] <= t) { k = mid; lo = mid + 1; } else hi = mid - 1;
+    }
+    const read = (i) => values.slice(i * dim, i * dim + dim);
+    if (k < 0) {
+      // before first key: use first key at/after window start
+      for (let i = 0; i < n; i++) if (times[i] >= start) return read(i);
+      return read(0);
+    }
+    if (times[k] < start) {
+      // last key belongs to an earlier animation on the shared timeline
+      const k2 = k + 1;
+      if (k2 < n && times[k2] <= end) return read(k2);
+      return read(k);
+    }
+    const k2 = k + 1;
+    if (k2 >= n || times[k2] > end || track.interp === 0) return read(k);
+    const span = times[k2] - times[k];
+    const f = span > 0 ? (t - times[k]) / span : 0;
+    const a = read(k), b = read(k2);
+    if (dim === 4) {
+      // quaternion nlerp with hemisphere correction
+      let dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
+      const s = dot < 0 ? -1 : 1;
+      const out = [
+        a[0] + (b[0] * s - a[0]) * f,
+        a[1] + (b[1] * s - a[1]) * f,
+        a[2] + (b[2] * s - a[2]) * f,
+        a[3] + (b[3] * s - a[3]) * f,
+      ];
+      const l = Math.hypot(out[0], out[1], out[2], out[3]) || 1;
+      return [out[0] / l, out[1] / l, out[2] / l, out[3] / l];
+    }
+    return a.map((v, i) => v + (b[i] - v) * f);
+  }
+
+  // compute per-bone 3x4 world transforms (row-major [r00..r02,tx, r10..,ty, r20..,tz])
+  function computePose(md, nowMs, camRight, camUp) {
+    const sk = md.skel;
+    const seq = sk.sequences[md.animSeq];
+    const dur = Math.max(1, seq.end - seq.start);
+    const t = seq.start + ((nowMs - md.animT0) % dur);
+    const bones = sk.bones;
+    const world = md.boneMats; // Float32Array(bones*12)
+    const done = md.boneDone;
+    done.fill(0);
+
+    const camFwd = [
+      camRight[1] * camUp[2] - camRight[2] * camUp[1],
+      camRight[2] * camUp[0] - camRight[0] * camUp[2],
+      camRight[0] * camUp[1] - camRight[1] * camUp[0],
+    ];
+
+    const compute = (bi) => {
+      if (done[bi]) return;
+      const b = bones[bi];
+      if (b.parent >= 0) compute(b.parent);
+      const tr = b.trans ? sampleTrack(b.trans, 3, t, seq.start, seq.end, sk.globalSeqs, nowMs) : [0, 0, 0];
+      const rq = b.rot ? sampleTrack(b.rot, 4, t, seq.start, seq.end, sk.globalSeqs, nowMs) : null;
+      const sc = b.scale ? sampleTrack(b.scale, 3, t, seq.start, seq.end, sk.globalSeqs, nowMs) : [1, 1, 1];
+      const R = rq ? quatToMat3(rq[0], rq[1], rq[2], rq[3]) : [1, 0, 0, 0, 1, 0, 0, 0, 1];
+      // local = T(pivot + trans) * R * S * T(-pivot)
+      const px = b.pivot[0], py = b.pivot[1], pz = b.pivot[2];
+      const l = [
+        R[0] * sc[0], R[1] * sc[1], R[2] * sc[2], 0,
+        R[3] * sc[0], R[4] * sc[1], R[5] * sc[2], 0,
+        R[6] * sc[0], R[7] * sc[1], R[8] * sc[2], 0,
+      ];
+      l[3] = px + tr[0] - (l[0] * px + l[1] * py + l[2] * pz);
+      l[7] = py + tr[1] - (l[4] * px + l[5] * py + l[6] * pz);
+      l[11] = pz + tr[2] - (l[8] * px + l[9] * py + l[10] * pz);
+
+      const o = bi * 12;
+      if (b.parent >= 0) {
+        const p = b.parent * 12;
+        for (let r = 0; r < 3; r++) {
+          const pr = p + r * 4;
+          for (let c = 0; c < 3; c++) {
+            world[o + r * 4 + c] = world[pr] * l[c] + world[pr + 1] * l[4 + c] + world[pr + 2] * l[8 + c];
+          }
+          world[o + r * 4 + 3] = world[pr] * l[3] + world[pr + 1] * l[7] + world[pr + 2] * l[11] + world[pr + 3];
+        }
+      } else {
+        world.set(l, o);
+      }
+      if (b.flags & 0x8) {
+        // spherical billboard: replace rotation with camera axes (keep scale magnitude)
+        const o2 = bi * 12;
+        const sx = Math.hypot(world[o2], world[o2 + 4], world[o2 + 8]) || 1;
+        // world position of the pivot stays fixed
+        const wx = world[o2] * px + world[o2 + 1] * py + world[o2 + 2] * pz + world[o2 + 3];
+        const wy = world[o2 + 4] * px + world[o2 + 5] * py + world[o2 + 6] * pz + world[o2 + 7];
+        const wz = world[o2 + 8] * px + world[o2 + 9] * py + world[o2 + 10] * pz + world[o2 + 11];
+        const B = [
+          -camFwd[0] * sx, camRight[0] * sx, camUp[0] * sx,
+          -camFwd[1] * sx, camRight[1] * sx, camUp[1] * sx,
+          -camFwd[2] * sx, camRight[2] * sx, camUp[2] * sx,
+        ];
+        world[o2] = B[0]; world[o2 + 1] = B[1]; world[o2 + 2] = B[2];
+        world[o2 + 4] = B[3]; world[o2 + 5] = B[4]; world[o2 + 6] = B[5];
+        world[o2 + 8] = B[6]; world[o2 + 9] = B[7]; world[o2 + 10] = B[8];
+        world[o2 + 3] = wx - (B[0] * px + B[1] * py + B[2] * pz);
+        world[o2 + 7] = wy - (B[3] * px + B[4] * py + B[5] * pz);
+        world[o2 + 11] = wz - (B[6] * px + B[7] * py + B[8] * pz);
+      }
+      done[bi] = 1;
+    };
+    for (let i = 0; i < bones.length; i++) compute(i);
+  }
+
+  function skinModel(md) {
+    const { basePos, baseNrm, weights, bIndices } = md.skin;
+    const world = md.boneMats;
+    const out = md.skin.outPos, outN = md.skin.outNrm;
+    const nv = basePos.length / 3;
+    for (let v = 0; v < nv; v++) {
+      const p0 = basePos[v * 3], p1 = basePos[v * 3 + 1], p2 = basePos[v * 3 + 2];
+      const n0 = baseNrm[v * 3], n1 = baseNrm[v * 3 + 1], n2 = baseNrm[v * 3 + 2];
+      let x = 0, y = 0, z = 0, nx = 0, ny = 0, nz = 0, wsum = 0;
+      for (let k = 0; k < 4; k++) {
+        const w = weights[v * 4 + k];
+        if (w === 0) continue;
+        wsum += w;
+        const o = bIndices[v * 4 + k] * 12;
+        x += w * (world[o] * p0 + world[o + 1] * p1 + world[o + 2] * p2 + world[o + 3]);
+        y += w * (world[o + 4] * p0 + world[o + 5] * p1 + world[o + 6] * p2 + world[o + 7]);
+        z += w * (world[o + 8] * p0 + world[o + 9] * p1 + world[o + 10] * p2 + world[o + 11]);
+        nx += w * (world[o] * n0 + world[o + 1] * n1 + world[o + 2] * n2);
+        ny += w * (world[o + 4] * n0 + world[o + 5] * n1 + world[o + 6] * n2);
+        nz += w * (world[o + 8] * n0 + world[o + 9] * n1 + world[o + 10] * n2);
+      }
+      if (wsum === 0) { x = p0; y = p1; z = p2; nx = n0; ny = n1; nz = n2; }
+      out[v * 3] = x; out[v * 3 + 1] = y; out[v * 3 + 2] = z;
+      outN[v * 3] = nx; outN[v * 3 + 1] = ny; outN[v * 3 + 2] = nz;
+    }
+  }
+
   // ---------- scene setup ----------
   function buildModel(item) {
     const geom = item.geom;
@@ -353,12 +515,37 @@ const Viewer = (() => {
       cap: Math.min(1200, Math.ceil(Math.min(500, def.emissionRate || 12) * def.lifespan * 1.4) + 8),
     }));
 
-    return {
+    const md = {
       mesh, textures, emitters, bounds,
       gray: !!item.gray,
       T: makeTransform(item.transform),
       rawTransform: item.transform || null,
+      skel: null, animSeq: -1, animT0: 0,
     };
+
+    // skeleton + skinning setup
+    if (mesh && geom.skeleton && geom.boneWeights && geom.boneIndices &&
+        geom.skeleton.sequences.length && geom.skeleton.bones.length) {
+      md.skel = geom.skeleton;
+      md.boneMats = new Float32Array(md.skel.bones.length * 12);
+      md.boneDone = new Uint8Array(md.skel.bones.length);
+      md.skin = {
+        basePos: new Float32Array(geom.positions),
+        baseNrm: new Float32Array(geom.normals),
+        weights: new Float32Array(geom.boneWeights),
+        bIndices: new Uint8Array(geom.boneIndices),
+        outPos: new Float32Array(geom.positions.length),
+        outNrm: new Float32Array(geom.normals.length),
+      };
+      // default: play the id-0 sequence (Stand for characters, the effect loop
+      // for spell models) unless the caller opted out
+      if (item.animate !== false) {
+        const idx = md.skel.sequences.findIndex((s) => s.id === 0 && s.end > s.start);
+        md.animSeq = idx >= 0 ? idx : 0;
+        md.animT0 = performance.now();
+      }
+    }
+    return md;
   }
 
   function reframe() {
@@ -676,6 +863,28 @@ const Viewer = (() => {
     gl.vertexAttrib2f(mLoc.aUV, 0, 0);
     gl.drawArrays(gl.LINES, 0, gridCount);
 
+    // animate + skin
+    for (const md of models) {
+      if (!md.mesh || !md.skel || md.animSeq < 0) continue;
+      // billboard axes must live in model space: undo the model transform's rotation
+      let br = right, bu = up;
+      if (md.T) {
+        const R = md.T.R; // transpose = inverse for pure rotation
+        br = [R[0][0] * right[0] + R[1][0] * right[1] + R[2][0] * right[2],
+              R[0][1] * right[0] + R[1][1] * right[1] + R[2][1] * right[2],
+              R[0][2] * right[0] + R[1][2] * right[1] + R[2][2] * right[2]];
+        bu = [R[0][0] * up[0] + R[1][0] * up[1] + R[2][0] * up[2],
+              R[0][1] * up[0] + R[1][1] * up[1] + R[2][1] * up[2],
+              R[0][2] * up[0] + R[1][2] * up[1] + R[2][2] * up[2]];
+      }
+      computePose(md, now, br, bu);
+      skinModel(md);
+      gl.bindBuffer(gl.ARRAY_BUFFER, md.mesh.vbo);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, md.skin.outPos);
+      gl.bindBuffer(gl.ARRAY_BUFFER, md.mesh.nbo);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, md.skin.outNrm);
+    }
+
     for (const md of models) if (md.mesh) drawMesh(md, mvp);
 
     // particles across all models
@@ -821,5 +1030,24 @@ const Viewer = (() => {
     setBrightness: (v) => { brightness = Math.max(0.25, Math.min(4, Number(v) || 1)); },
     setBackground: (i) => { bgLevel = Math.max(0, Math.min(BG_LEVELS.length - 1, i | 0)); },
     backgroundLevels: 3,
+    // seqIndex into geom.skeleton.sequences, or -1 for bind pose
+    setAnimation: (mi, seqIndex) => {
+      const md = models[mi];
+      if (!md || !md.skel) return;
+      if (seqIndex < 0 || seqIndex >= md.skel.sequences.length) {
+        md.animSeq = -1;
+        // restore bind pose geometry
+        if (md.skin && md.mesh) {
+          gl.bindBuffer(gl.ARRAY_BUFFER, md.mesh.vbo);
+          gl.bufferSubData(gl.ARRAY_BUFFER, 0, md.skin.basePos);
+          gl.bindBuffer(gl.ARRAY_BUFFER, md.mesh.nbo);
+          gl.bufferSubData(gl.ARRAY_BUFFER, 0, md.skin.baseNrm);
+        }
+        return;
+      }
+      md.animSeq = seqIndex;
+      md.animT0 = performance.now();
+    },
+    getAnimation: (mi) => (models[mi] && models[mi].skel ? models[mi].animSeq : -1),
   };
 })();
