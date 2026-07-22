@@ -1019,12 +1019,23 @@ async function openStoryboard(visualId, spell) {
 
   let castTime = 2000;
   let speed = spell && spell.Speed > 0 ? spell.Speed : 20;
+  let DIST = 15, rangeNote = 'default 15yd';
   if (spell) {
     const ct = rec('SpellCastTimes', spell.CastingTimeIndex);
     if (ct && ct.Base > 0) castTime = ct.Base;
+    const range = rec('SpellRange', spell.RangeIndex);
+    if (range) {
+      if (range.RangeMax > 0) {
+        DIST = Math.min(range.RangeMax, 25);
+        rangeNote = `range ${range.RangeMax}yd${range.RangeMax > 25 ? ' (shown at 25)' : ''}`;
+      } else {
+        DIST = 0; // self-cast: everything lands on the caster
+        rangeNote = 'self-cast';
+      }
+    }
   }
   castTime = Math.max(1200, castTime);
-  const DIST = 15;
+  const selfCast = DIST === 0;
 
   const charPath = CHAR_MODELS[0];
   if (!charGeomCache.has(charPath)) charGeomCache.set(charPath, await fetchModel(charPath));
@@ -1054,25 +1065,26 @@ async function openStoryboard(visualId, spell) {
     return geomCache.get(effectId);
   };
 
-  const casterPos = [0, 0, 0], targetPos = [DIST, 0, 0];
+  const casterPos = [0, 0, 0], targetPos = selfCast ? casterPos : [DIST, 0, 0];
   const items = [
     { geom: cg, gray: true, noParticles: true, transform: { offset: casterPos } },
-    { geom: cg, gray: true, noParticles: true, transform: { offset: targetPos, yaw: Math.PI } },
   ];
+  if (!selfCast) items.push({ geom: cg, gray: true, noParticles: true, transform: { offset: targetPos, yaw: Math.PI } });
+  const targetMi = selfCast ? 0 : 1;
   const fxModels = [];
   for (const f of fx.slice(0, 10)) {
     const g = await fxGeom(f.effectId);
     if (!g || (g.particleOnly && !(g.particles || []).length)) continue;
     const base = f.tgt === 'caster' ? casterPos : targetPos;
     const ap = attachPosOf(cg, f.attachIds);
-    const yaw = f.tgt === 'target' ? Math.PI : 0;
+    const yaw = f.tgt === 'target' && !selfCast ? Math.PI : 0;
     const rp = yaw ? [-ap[0], -ap[1], ap[2]] : ap;
     items.push({ geom: g, visible: false, transform: { offset: [base[0] + rp[0], base[1] + rp[1], base[2] + rp[2]], yaw } });
     fxModels.push({ mi: items.length - 1, phase: f.phase });
   }
 
   let missileMi = -1, missileStart = null, missileEnd = null;
-  if (v.MissileModel > 0) {
+  if (v.MissileModel > 0 && !selfCast) {
     const g = await fxGeom(v.MissileModel);
     if (g) {
       const ap = attachPosOf(cg, [34, 15]);
@@ -1120,13 +1132,13 @@ async function openStoryboard(visualId, spell) {
   const enter = (phase) => {
     if (st.phase === phase) return;
     st.phase = phase;
-    msg.textContent = `▶ ${phase} — cast ${Math.round(castTime)}ms · ${DIST}yd` +
+    msg.textContent = `▶ ${phase} — cast ${Math.round(castTime)}ms · ${rangeNote}` +
       (missileMi >= 0 ? ` · missile ${speed.toFixed(0)} yd/s (${Math.round(flightMs)}ms)` : '') + ' · loops';
     if (phase === 'precast') {
       showPhase('state', false); showPhase('impact', false); showPhase('cast', false);
       showPhase('precast', true);
       setChar(0, kitAnim(kits.precast, [31, 32, 0]));
-      setChar(1, [0]);
+      if (!selfCast) setChar(targetMi, [0]);
       kitSound(kits.precast);
     } else if (phase === 'cast') {
       showPhase('precast', false);
@@ -1140,12 +1152,12 @@ async function openStoryboard(visualId, spell) {
       if (missileMi >= 0) Viewer.setVisible(missileMi, false);
       showPhase('impact', true);
       setChar(0, [0]);
-      setChar(1, [9, 0]); // CombatWound flinch
+      if (!selfCast) setChar(targetMi, [9, 0]); // CombatWound flinch
       kitSound(kits.impact);
     } else if (phase === 'state') {
       showPhase('impact', false);
       showPhase('state', true);
-      setChar(1, [0]);
+      setChar(targetMi, [0]);
       kitSound(kits.state);
     } else if (phase === 'rest') {
       showPhase('state', false);
