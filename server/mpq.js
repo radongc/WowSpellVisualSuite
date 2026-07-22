@@ -95,7 +95,7 @@ function readFile(vpath) {
 // Enumerate every model file (.m2/.mdx/.mdl) across the archive chain.
 // Cached until the next init(). Priority order means the first occurrence of a
 // path is the one the client would actually load.
-function listModels() {
+function listAllFiles() {
   if (modelCache) return modelCache;
   const seen = new Map();
   for (const a of archives) {
@@ -103,7 +103,7 @@ function listModels() {
     try { results = a.mpq.search('*'); } catch (e) { continue; }
     for (const r of results) {
       const nm = r.fileName;
-      if (!nm || !/\.(m2|mdx|mdl)$/i.test(nm)) continue;
+      if (!nm) continue;
       if (/^File\d{8}/i.test(nm)) continue; // archive lacks a (listfile) — pseudo names are unusable
       const norm = nm.replace(/\//g, '\\');
       const key = norm.toLowerCase();
@@ -114,4 +114,18 @@ function listModels() {
   return modelCache;
 }
 
-module.exports = { init, list, readFile, listModels };
+function listModels() {
+  return listAllFiles().filter((f) => /\.(m2|mdx|mdl)$/i.test(f.path));
+}
+
+// BLP textures directly inside a directory (used to resolve creature-skin
+// texture slots by the "skins live next to the model" convention).
+function blpsInDir(dir) {
+  const d = String(dir).replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+  return listAllFiles().filter((f) => {
+    const p = f.path.toLowerCase();
+    return p.endsWith('.blp') && p.startsWith(d + '\\') && !p.slice(d.length + 1).includes('\\');
+  });
+}
+
+module.exports = { init, list, readFile, listModels, blpsInDir };

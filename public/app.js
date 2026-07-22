@@ -62,6 +62,8 @@ function el(tag, attrs = {}, ...children) {
     if (k === 'class') e.className = v;
     else if (k === 'html') e.innerHTML = v;
     else if (k.startsWith('on')) e.addEventListener(k.slice(2), v);
+    else if (v === false) { /* boolean attribute off — omit entirely */ }
+    else if (v === true) e.setAttribute(k, '');
     else if (v !== undefined && v !== null) e.setAttribute(k, v);
   }
   for (const c of children.flat()) {
@@ -1081,10 +1083,24 @@ function renderLabControls() {
 
 let story = null;
 
+// Storyboard actors: the default Human Male player model — full animation set
+// including the vanilla spell-cast sequences — with its body skin resolved
+// server-side so it renders textured rather than blank white.
+const STORY_CHAR = 'Character\\Human\\Male\\HumanMale.m2';
+
+// Vanilla character animation IDs (AnimationData.dbc): spell cast/ready differ
+// from later expansions. Directed = aimed at a target, Omni = self/AoE.
+const ANIM = {
+  stand: 0, standWound: 8,
+  readySpellDirected: 51, readySpellOmni: 52,
+  spellCastDirected: 53, spellCastOmni: 54,
+};
+
 function stopStoryboard() {
   if (story) {
     cancelAnimationFrame(story.raf);
     story = null;
+    Viewer.setPanEnabled(false);
   }
 }
 
@@ -1134,25 +1150,25 @@ async function openStoryboard(visualId, spell) {
 
   let castTime = 2000;
   let speed = spell && spell.Speed > 0 ? spell.Speed : 20;
-  let DIST = 15, rangeNote = 'default 15yd';
+  // Actors are kept close (5yd) so the whole exchange stays readable in frame;
+  // real ranges get too spread out to see the action. Range only decides whether
+  // it's a self-cast (single actor) vs. caster→target.
+  let DIST = 5, rangeNote = '5yd';
   if (spell) {
     const ct = rec('SpellCastTimes', spell.CastingTimeIndex);
     if (ct && ct.Base > 0) castTime = ct.Base;
     const range = rec('SpellRange', spell.RangeIndex);
-    if (range) {
-      if (range.RangeMax > 0) {
-        DIST = Math.min(range.RangeMax, 25);
-        rangeNote = `range ${range.RangeMax}yd${range.RangeMax > 25 ? ' (shown at 25)' : ''}`;
-      } else {
-        DIST = 0; // self-cast: everything lands on the caster
-        rangeNote = 'self-cast';
-      }
+    if (range && range.RangeMax === 0) {
+      DIST = 0; // self-cast: everything lands on the caster
+      rangeNote = 'self-cast';
+    } else if (range) {
+      rangeNote = `range ${range.RangeMax}yd (shown at 5)`;
     }
   }
   castTime = Math.max(1200, castTime);
   const selfCast = DIST === 0;
 
-  const charPath = CHAR_MODELS[0];
+  const charPath = STORY_CHAR;
   if (!charGeomCache.has(charPath)) charGeomCache.set(charPath, await fetchModel(charPath));
   const cg = charGeomCache.get(charPath);
 
@@ -1182,9 +1198,9 @@ async function openStoryboard(visualId, spell) {
 
   const casterPos = [0, 0, 0], targetPos = selfCast ? casterPos : [DIST, 0, 0];
   const items = [
-    { geom: cg, gray: true, noParticles: true, transform: { offset: casterPos } },
+    { geom: cg, noParticles: true, transform: { offset: casterPos } },
   ];
-  if (!selfCast) items.push({ geom: cg, gray: true, noParticles: true, transform: { offset: targetPos, yaw: Math.PI } });
+  if (!selfCast) items.push({ geom: cg, noParticles: true, transform: { offset: targetPos, yaw: Math.PI } });
   const targetMi = selfCast ? 0 : 1;
   const fxModels = [];
   for (const f of fx.slice(0, 10)) {
@@ -1217,8 +1233,9 @@ async function openStoryboard(visualId, spell) {
   }
 
   Viewer.showComposite(items);
+  Viewer.setPanEnabled(true);
   populateAnimSelect(null);
-  for (let mi = 2; mi < items.length; mi++) fetchTexturesFor(mi, items[mi].geom);
+  items.forEach((it, mi) => { if (!it.gray) fetchTexturesFor(mi, it.geom); });
 
   const kitSound = (kid) => {
     const k = kid > 0 ? rec('SpellVisualKit', kid) : null;
@@ -1255,16 +1272,21 @@ async function openStoryboard(visualId, spell) {
     st.phase = phase;
     msg.textContent = `▶ ${phase} — cast ${Math.round(castTime)}ms · ${rangeNote}` +
       (missileMi >= 0 ? ` · missile ${speed.toFixed(0)} yd/s (${Math.round(flightMs)}ms)` : '') + ' · loops';
+    // directed animations for targeted spells, omni for self-cast
+    const readyAnim = selfCast ? [ANIM.readySpellOmni, ANIM.readySpellDirected, ANIM.stand]
+      : [ANIM.readySpellDirected, ANIM.readySpellOmni, ANIM.stand];
+    const castAnim = selfCast ? [ANIM.spellCastOmni, ANIM.spellCastDirected, ANIM.stand]
+      : [ANIM.spellCastDirected, ANIM.spellCastOmni, ANIM.stand];
     if (phase === 'precast') {
       showPhase('state', false); showPhase('impact', false); showPhase('cast', false);
       showPhase('precast', true);
-      setChar(0, kitAnim(kits.precast, [31, 32, 0]));
-      if (!selfCast) setChar(targetMi, [0]);
+      setChar(0, kitAnim(kits.precast, readyAnim));
+      if (!selfCast) setChar(targetMi, [ANIM.stand]);
       kitSound(kits.precast);
     } else if (phase === 'cast') {
       showPhase('precast', false);
       showPhase('cast', true);
-      setChar(0, kitAnim(kits.cast, [32, 78, 0]));
+      setChar(0, kitAnim(kits.cast, castAnim));
       kitSound(kits.cast);
       if (missileMi >= 0) Viewer.setVisible(missileMi, true);
       if (v.MissileSound > 0) new Audio(`/api/sound/${v.MissileSound}`).play().catch(() => {});
@@ -1272,13 +1294,13 @@ async function openStoryboard(visualId, spell) {
       showPhase('cast', false);
       if (missileMi >= 0) Viewer.setVisible(missileMi, false);
       showPhase('impact', true);
-      setChar(0, [0]);
-      if (!selfCast) setChar(targetMi, [9, 0]); // CombatWound flinch
+      setChar(0, [ANIM.stand]);
+      if (!selfCast) setChar(targetMi, [ANIM.standWound, ANIM.stand]); // damage flinch
       kitSound(kits.impact);
     } else if (phase === 'state') {
       showPhase('impact', false);
       showPhase('state', true);
-      setChar(targetMi, [0]);
+      setChar(targetMi, [ANIM.stand]);
       kitSound(kits.state);
     } else if (phase === 'rest') {
       showPhase('state', false);

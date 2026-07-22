@@ -244,6 +244,38 @@ route('GET', /^\/api\/sound\/(\d+)$/, (req, res, m) => {
   res.end(hit.data);
 });
 
+// Models leave "replaceable" texture slots empty for the client to fill:
+//  - creatures (type 11+) via CreatureDisplayInfo
+//  - player characters (type 1 body / 6 hair) via a CharSections composite
+// We approximate both from BLPs in the model's own folder so previews aren't
+// blank-white. Character bodies use the full-body skin atlas (…Skin00_00.blp).
+function resolveModelSkins(geom, vpath) {
+  if (!geom.textures) return;
+  const needCreature = geom.textures.some((t) => t.type >= 11 && !t.fileName);
+  const needChar = geom.textures.some((t) => (t.type === 1 || t.type === 6) && !t.fileName);
+  if (!needCreature && !needChar) return;
+
+  const clean = String(vpath).replace(/\//g, '\\');
+  const dir = clean.replace(/\\[^\\]*$/, '');
+  const modelBase = clean.replace(/^.*\\/, '').replace(/\.(m2|mdx|mdl)$/i, '');
+  const blps = mpq.blpsInDir(dir).map((f) => f.path).sort();
+  if (!blps.length) return;
+
+  // full-body skin: <ModelName>Skin00_00.blp, else first non-region *Skin00_00
+  const bodySkin = blps.find((b) => b.toLowerCase().endsWith(`${modelBase}skin00_00.blp`))
+    || blps.find((b) => /skin00_00\.blp$/i.test(b) && !/naked|face|extra|scalp|hair|underwear/i.test(b));
+  const hairTex = blps.find((b) => /scalplowerhair00_00\.blp$/i.test(b))
+    || blps.find((b) => /hair00_00\.blp$/i.test(b));
+
+  let ci = 0;
+  for (const t of geom.textures) {
+    if (t.fileName) continue;
+    if (t.type === 1 && bodySkin) t.fileName = bodySkin;
+    else if (t.type === 6 && hairTex) t.fileName = hairTex;
+    else if (t.type >= 11) { t.fileName = blps[Math.min(ci, blps.length - 1)]; ci++; }
+  }
+}
+
 // 3D preview geometry for a model referenced by SpellVisualEffectName.FileName.
 // Resolution order: loose file under gamedata/ (extracted overrides), then the
 // MPQ archive chain (patch-2 > patch > base), trying .m2/.mdx/.mdl variants.
@@ -261,6 +293,7 @@ route('GET', /^\/api\/model$/, (req, res, m, url) => {
   if (file) {
     try {
       const geom = parseM2(fs.readFileSync(file));
+      resolveModelSkins(geom, vpath);
       return sendJson(res, 200, { file: path.relative(GAMEDATA_DIR, file), ...geom });
     } catch (e) {
       return sendJson(res, 422, { error: `failed to parse ${path.basename(file)}: ${e.message}` });
@@ -274,6 +307,7 @@ route('GET', /^\/api\/model$/, (req, res, m, url) => {
     if (!hit) continue;
     try {
       const geom = parseM2(hit.data);
+      resolveModelSkins(geom, base + ext);
       return sendJson(res, 200, { file: `${hit.archive}:${base + ext}`, ...geom });
     } catch (e) {
       return sendJson(res, 422, { error: `failed to parse ${base + ext} from ${hit.archive}: ${e.message}` });

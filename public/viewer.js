@@ -14,7 +14,7 @@ const Viewer = (() => {
   const canvas = document.getElementById('gl');
   const gl = canvas.getContext('webgl', { antialias: true, alpha: false });
   if (!gl) {
-    return { show() {}, showComposite() {}, clear() {}, setTexture() {}, setModelTexture() {}, setTransform() {}, setVisible() {}, setLabDrag() {}, setWireframe() {}, setSpin() {}, setParticles() {}, setBrightness() {}, setBackground() {}, backgroundLevels: 3, setAnimation() {}, getAnimation() { return -1; } };
+    return { show() {}, showComposite() {}, clear() {}, setTexture() {}, setModelTexture() {}, setTransform() {}, setVisible() {}, setPanEnabled() {}, setLabDrag() {}, setWireframe() {}, setSpin() {}, setParticles() {}, setBrightness() {}, setBackground() {}, backgroundLevels: 3, setAnimation() {}, getAnimation() { return -1; } };
   }
   let models = [];            // [{ mesh, textures, emitters, transform, gray }]
   let sceneCenter = [0, 0, 0.5], sceneRadius = 1;
@@ -22,7 +22,7 @@ const Viewer = (() => {
   let yaw = 0.6, pitch = 0.35, dist = 3;
   let pan = [0, 0, 0];        // camera target offset (lab panning)
   let dragging = false, lastX = 0, lastY = 0, labDragCb = null, labDragging = false;
-  let panning = false;
+  let panning = false, panEnabled = false;
   let lastT = 0;
   // gizmo state (lab mode: models[1] is the positioned effect)
   let lastMvp = null, lastRight = [1, 0, 0], lastUp = [0, 0, 1];
@@ -976,8 +976,8 @@ const Viewer = (() => {
 
   canvas.addEventListener('mousedown', (e) => {
     lastX = e.clientX; lastY = e.clientY;
-    // right/middle button pans the camera (lab mode only)
-    if (labDragCb && (e.button === 1 || e.button === 2)) {
+    // right/middle button pans the camera (lab and storyboard modes)
+    if ((labDragCb || panEnabled) && (e.button === 1 || e.button === 2)) {
       e.preventDefault();
       panning = true;
       return;
@@ -995,7 +995,7 @@ const Viewer = (() => {
     }
     labDragging = !!(labDragCb && e.shiftKey);
   });
-  canvas.addEventListener('contextmenu', (e) => { if (labDragCb) e.preventDefault(); });
+  canvas.addEventListener('contextmenu', (e) => { if (labDragCb || panEnabled) e.preventDefault(); });
   window.addEventListener('mouseup', () => {
     dragging = false; labDragging = false; panning = false;
     gizmoAxis = -1; gizmoDrag = null;
@@ -1053,6 +1053,10 @@ const Viewer = (() => {
     show, showComposite, clear,
     setTexture: (i, w, h, rgba) => setModelTexture(0, i, w, h, rgba),
     setModelTexture, setTransform, setVisible,
+    setPanEnabled: (b) => {
+      panEnabled = !!b;
+      if (!b && !labDragCb) pan = [0, 0, 0];
+    },
     setLabDrag: (cb) => {
       labDragCb = cb;
       if (!cb) {
