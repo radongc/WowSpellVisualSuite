@@ -503,7 +503,16 @@ async function renderSpellEditor(content, id) {
     el('div', { class: 'field-grid' },
       textLocField(spell, 'Name', 'Name'),
       textLocField(spell, 'NameSubtext', 'Rank'),
-      numField(spell, 'Spell', 'SpellIconID', 'Icon ID'),
+      numField(spell, 'Spell', 'SpellIconID', 'Icon ID', {
+        // wait out the debounced PUT so the server has the new value, then
+        // refresh the header icon and the sidebar row
+        after: () => setTimeout(() => {
+          if (state.selection && state.selection.type === 'spell') {
+            renderEditor();
+            renderList();
+          }
+        }, 450),
+      }),
       numField(spell, 'Spell', 'CastingTimeIndex', 'Cast time index'),
       numField(spell, 'Spell', 'DurationIndex', 'Duration index'),
       numField(spell, 'Spell', 'RangeIndex', 'Range index'),
