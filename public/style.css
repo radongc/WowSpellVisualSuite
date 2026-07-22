@@ -159,14 +159,9 @@ details.adv > summary { cursor: pointer; color: var(--muted); font-size: 12px; p
 #preview-title { color: var(--text); overflow-wrap: anywhere; }
 .canvas-wrap { flex: 1; position: relative; min-height: 0; display: flex; }
 #gl { flex: 1; width: 100%; min-height: 0; background: radial-gradient(ellipse at 50% 40%, #181c24 0%, #0b0d10 75%); }
-.preview-overlay {
-  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
-  text-align: center; padding: 24px; font-size: 13px; color: var(--muted);
-  background: rgba(10, 12, 15, .55); pointer-events: none; line-height: 1.6;
-}
-.preview-overlay b { color: var(--text); }
-.preview-overlay code { font-family: var(--mono); font-size: 12px; color: var(--accent2); overflow-wrap: anywhere; }
-.preview-msg { padding: 10px 14px; font-size: 12px; color: var(--muted); border-top: 1px solid var(--border); min-height: 40px; overflow-wrap: anywhere; }
+.preview-msg { padding: 10px 14px; font-size: 12px; color: var(--muted); border-top: 1px solid var(--border); min-height: 40px; overflow-wrap: anywhere; line-height: 1.6; }
+.preview-msg b { color: var(--text); }
+.preview-msg code { font-family: var(--mono); font-size: 12px; color: var(--accent2); overflow-wrap: anywhere; }
 .preview-foot { display: flex; flex-wrap: wrap; gap: 8px 16px; padding: 6px 12px; font-size: 12px; color: var(--muted); border-top: 1px solid var(--border); }
 .preview-foot label { display: flex; align-items: center; gap: 5px; }
 

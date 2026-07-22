@@ -151,7 +151,11 @@ function parseM2(buf) {
     if (vSub.count > 0 && vSub.offset + vSub.count * 32 <= buf.length) {
       for (let i = 0; i < vSub.count; i++) {
         const o = vSub.offset + i * 32;
-        submeshes.push({ indexStart: buf.readUInt16LE(o + 8), indexCount: buf.readUInt16LE(o + 10) });
+        submeshes.push({
+          geoset: buf.readUInt16LE(o), // skinSectionId: char/creature geoset variant
+          indexStart: buf.readUInt16LE(o + 8),
+          indexCount: buf.readUInt16LE(o + 10),
+        });
       }
       if (submeshes.some((s) => s.indexStart + s.indexCount > indices.length)) throw new Error('submeshes failed validation');
     }
@@ -166,6 +170,7 @@ function parseM2(buf) {
         const texIdx = textureComboIndex < texLookup.length ? texLookup[textureComboIndex] : 0xFFFF;
         const mat = materials[materialIndex] || { flags: 0, blend: 2 };
         batches.push({
+          geoset: sub.geoset,
           indexStart: sub.indexStart,
           indexCount: sub.indexCount,
           texture: texIdx !== 0xFFFF && texIdx < textures.length ? texIdx : -1,

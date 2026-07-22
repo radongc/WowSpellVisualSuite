@@ -470,7 +470,7 @@ async function renderSpellEditor(content, id) {
           class: 'primary',
           title: 'Play the full spell sequence with this spell’s cast time and missile speed',
           onclick: () => openStoryboard(spell.SpellVisualID[0], spell),
-        }, '▶ Storyboard'),
+        }, '▶ Preview Spell'),
         el('button', {
           title: 'Clone visual 1 with all its kits and effects, and point this spell at the new copy — ready to customize without touching the original',
           onclick: () => cloneChain(spell.SpellVisualID[0], spell.ID, 0),
@@ -546,7 +546,7 @@ function renderVisualEditor(content, id) {
       class: 'primary',
       title: 'Play the full spell sequence on a caster/target pair: precast → cast → missile → impact → state',
       onclick: () => openStoryboard(v.ID, null),
-    }, '▶ Storyboard')));
+    }, '▶ Preview Spell')));
   const usedBy = el('div', { class: 'ed-sub' }, 'Looking up spells using this visual…');
   content.append(usedBy);
   api(`/api/spells?visual=${id}&limit=500`).then((page) => {
@@ -568,29 +568,57 @@ function renderVisualEditor(content, id) {
   previewForVisualId(id);
 }
 
+// Slot headers are "<label>  <link>"; swap only the link, keeping the label node.
+function setSlotLink(nameRow, link) {
+  while (nameRow.childNodes.length > 1) nameRow.lastChild.remove();
+  nameRow.append(link);
+}
+
+// First effect id referenced by a kit's attachment slots, or 0.
+function firstKitEffect(kitId) {
+  const k = kitId > 0 ? rec('SpellVisualKit', kitId) : null;
+  if (!k) return 0;
+  return [...KIT_SLOT_FIELDS.map(([f]) => k[f]), ...k.SpecialEffect, k.WorldEffect].find((x) => x > 0) || 0;
+}
+
 function renderVisualBody(content, v, compact) {
   // kit slots
   const grid = el('div', { class: 'slot-grid' });
   for (const [field, label, hint] of VISUAL_KIT_SLOTS) {
-    const kid = v[field];
-    const slot = el('div', { class: 'slot' + (kid > 0 ? '' : ' empty-slot') },
-      el('div', { class: 'slot-name' },
-        el('span', {}, label),
-        kid > 0
-          ? el('a', { onclick: () => select('kit', kid, [...state.crumbs, crumbFor(state.selection)]) }, `kit #${kid} ↗`)
-          : el('a', {
-            title: `Create a blank kit and assign it as this visual's ${label} kit`,
-            onclick: async () => {
-              try {
-                const id = await createLinkedRecord('SpellVisualKit', NEW_KIT_DEFAULTS);
-                v[field] = id;
-                scheduleSave('SpellVisual', v);
-                toast(`Created kit #${id}, assigned as ${label}.`);
-                select('kit', id, [...state.crumbs, crumbFor(state.selection)]);
-              } catch (e2) { toast('Create failed: ' + e2.message, true); }
-            },
-          }, '+ new kit')),
-      refField(v, 'SpellVisual', field, hint, REFS.kit, { after: () => renderEditor() }));
+    const slot = el('div', { class: 'slot' });
+    const nameRow = el('div', { class: 'slot-name' }, el('span', {}, label));
+    slot.append(nameRow);
+    // The header link and the greyed-out styling depend on the current kit id,
+    // so refresh them in place when it changes — re-rendering the whole editor
+    // would tear down (and, inside the spell editor, re-fetch) the entire page.
+    const refreshSlot = () => {
+      const kid = v[field];
+      slot.classList.toggle('empty-slot', !(kid > 0));
+      setSlotLink(nameRow, kid > 0
+        ? el('a', { onclick: () => select('kit', kid, [...state.crumbs, crumbFor(state.selection)]) }, `kit #${kid} ↗`)
+        : el('a', {
+          title: `Create a blank kit and assign it as this visual's ${label} kit`,
+          onclick: async () => {
+            try {
+              const id = await createLinkedRecord('SpellVisualKit', NEW_KIT_DEFAULTS);
+              v[field] = id;
+              scheduleSave('SpellVisual', v);
+              toast(`Created kit #${id}, assigned as ${label}.`);
+              select('kit', id, [...state.crumbs, crumbFor(state.selection)]);
+            } catch (e2) { toast('Create failed: ' + e2.message, true); }
+          },
+        }, '+ new kit'));
+    };
+    refreshSlot();
+    slot.append(refField(v, 'SpellVisual', field, hint, REFS.kit, {
+      // preview the newly linked kit's model; if it has none, fall back to
+      // whatever the visual still points at rather than blanking the viewer
+      after: (kid) => {
+        refreshSlot();
+        const fx = firstKitEffect(kid);
+        if (fx) previewEffectId(fx); else previewForVisualId(v.ID);
+      },
+    }));
     grid.append(slot);
   }
   content.append(el('div', { class: 'card' }, el('h3', {}, 'Visual kits'), grid));
@@ -599,7 +627,7 @@ function renderVisualBody(content, v, compact) {
   content.append(el('div', { class: 'card' },
     el('h3', {}, 'Missile'),
     el('div', { class: 'field-grid' },
-      boolField(v, 'SpellVisual', 'HasMissile', 'Has missile', { after: () => renderEditor() }),
+      boolField(v, 'SpellVisual', 'HasMissile', 'Has missile', { after: () => previewForVisualId(v.ID) }),
       refField(v, 'SpellVisual', 'MissileModel', 'Missile model', REFS.effect, { after: (val) => previewEffectId(val) }),
       selectField(v, 'SpellVisual', 'MissilePathType', 'Path type', Object.entries(PATH_TYPES)),
       selectField(v, 'SpellVisual', 'MissileDestinationAttachment', 'Destination attachment', Object.entries(ATTACH_POINTS)),
@@ -667,34 +695,43 @@ function renderKitEditor(content, id) {
     { field: 'WorldEffect', label: 'World' },
   ];
   for (const s of allSlots) {
-    const val = s.index != null ? k[s.field][s.index] : k[s.field];
-    grid.append(el('div', { class: 'slot' + (val > 0 ? '' : ' empty-slot') },
-      el('div', { class: 'slot-name' }, el('span', {}, s.label),
-        val > 0
-          ? el('a', { onclick: () => previewEffectId(val) }, 'preview')
-          : el('a', {
-            title: 'Create a new effect in this slot and pick its model from the browser',
-            onclick: async () => {
-              try {
-                const eid = await createLinkedRecord('SpellVisualEffectName', { Name: `New ${s.label} effect`, Scale: 1 });
-                if (s.index != null) k[s.field][s.index] = eid;
-                else k[s.field] = eid;
-                scheduleSave('SpellVisualKit', k);
-                toast(`Created effect #${eid} in the ${s.label} slot — pick a model.`);
-                select('effect', eid, [...state.crumbs, crumbFor(state.selection)]);
-                openModelBrowser((path) => {
-                  const e2 = rec('SpellVisualEffectName', eid);
-                  if (!e2) return;
-                  e2.FileName = path;
-                  scheduleSave('SpellVisualEffectName', e2);
-                  renderEditor();
-                });
-              } catch (e2) { toast('Create failed: ' + e2.message, true); }
-            },
-          }, '+ new')),
-      refField(k, 'SpellVisualKit', s.field, 'Effect (-1 = none)', REFS.effect, {
-        index: s.index, after: (v2) => { if (v2 > 0) previewEffectId(v2); },
-      })));
+    const slot = el('div', { class: 'slot' });
+    const nameRow = el('div', { class: 'slot-name' }, el('span', {}, s.label));
+    slot.append(nameRow);
+    // preview/+ new link and the greyed-out styling follow the slot's current
+    // effect id, so rebuild just those when the id changes
+    const refreshSlot = () => {
+      const val = s.index != null ? k[s.field][s.index] : k[s.field];
+      slot.classList.toggle('empty-slot', !(val > 0));
+      setSlotLink(nameRow, val > 0
+        ? el('a', { onclick: () => previewEffectId(val) }, 'preview')
+        : el('a', {
+          title: 'Create a new effect in this slot and pick its model from the browser',
+          onclick: async () => {
+            try {
+              const eid = await createLinkedRecord('SpellVisualEffectName', { Name: `New ${s.label} effect`, Scale: 1 });
+              if (s.index != null) k[s.field][s.index] = eid;
+              else k[s.field] = eid;
+              scheduleSave('SpellVisualKit', k);
+              toast(`Created effect #${eid} in the ${s.label} slot — pick a model.`);
+              select('effect', eid, [...state.crumbs, crumbFor(state.selection)]);
+              openModelBrowser((path) => {
+                const e2 = rec('SpellVisualEffectName', eid);
+                if (!e2) return;
+                e2.FileName = path;
+                scheduleSave('SpellVisualEffectName', e2);
+                renderEditor();
+              });
+            } catch (e2) { toast('Create failed: ' + e2.message, true); }
+          },
+        }, '+ new'));
+    };
+    refreshSlot();
+    slot.append(refField(k, 'SpellVisualKit', s.field, 'Effect (-1 = none)', REFS.effect, {
+      index: s.index,
+      after: (v2) => { refreshSlot(); if (v2 > 0) previewEffectId(v2); },
+    }));
+    grid.append(slot);
   }
   content.append(el('div', { class: 'card' },
     el('h3', {}, 'Attached effects ', el('span', { class: 'hint' }, '(models from SpellVisualEffectName)')),
@@ -1414,10 +1451,14 @@ function openModelBrowser(onPick) {
 // ---------- 3D preview ----------
 
 let previewSeq = 0;
+// These messages used to render in an overlay stretched across the canvas.
+// That element set `display: flex`, which beats the `hidden` attribute's
+// `display: none` — so its rgba(10,12,15,.55) scrim sat over every preview
+// permanently and dimmed every model by 45%. The overlay is gone; the text now
+// goes to the status line under the canvas, where nothing covers the render.
 function setOverlay(html) {
-  const ov = $('#preview-overlay');
-  if (html == null) { ov.hidden = true; ov.innerHTML = ''; }
-  else { ov.hidden = false; ov.innerHTML = html; }
+  if (html == null) return; // callers set their own status text on success
+  $('#preview-msg').innerHTML = html;
 }
 function escapeHtml(s) {
   return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -1475,10 +1516,9 @@ async function previewModelPath(filePath, opts = {}) {
     const emitters = (geom.particles || []).length;
     if (geom.particleOnly && !emitters) {
       Viewer.clear();
-      setOverlay(`<div><b>No previewable content.</b><br><code>${escapeHtml(filePath)}</code><br><br>` +
-        'This model has no mesh and no readable particle emitters.</div>');
       stats.textContent = '';
-      msg.textContent = `${filePath} → ${geom.file}`;
+      setOverlay(`<div><b>No previewable content.</b><br><code>${escapeHtml(filePath)} → ${escapeHtml(geom.file)}</code><br><br>` +
+        'This model has no mesh and no readable particle emitters.</div>');
       return;
     }
     Viewer.show(geom);
@@ -1508,17 +1548,14 @@ async function previewModelPath(filePath, opts = {}) {
     if (seq !== previewSeq) return;
     Viewer.clear();
     if (err.status === 404 && err.data && err.data.archives && err.data.archives.length) {
-      setOverlay(`<div><b>Model not found in your archives:</b><br><code>${escapeHtml(filePath)}</code><br><br>` +
+      setOverlay(`<div><b>Model not found in your archives:</b><br><code>${escapeHtml(filePath)}</code> — ${escapeHtml(err.message)}<br><br>` +
         `Searched: <code>${escapeHtml(err.data.archives.join(', '))}</code></div>`);
-      msg.textContent = `${filePath} — ${err.message}`;
     } else if (err.status === 404) {
       setOverlay(`<div><b>No game models found.</b><br>The DBC only stores the model path:<br><code>${escapeHtml(filePath)}</code><br><br>` +
         'Copy your 1.12.1 client’s <code>model.MPQ</code>, <code>patch.MPQ</code> and <code>patch-2.MPQ</code> ' +
         'into <code>gamedata/</code> at the project root (the whole <code>Data</code> folder works too), then press <b>Reload from disk</b>.</div>');
-      msg.textContent = `${filePath} — ${err.data && err.data.hint || err.message}`;
     } else {
       setOverlay(`<div><b>Could not parse model:</b><br><code>${escapeHtml(filePath)}</code><br>${escapeHtml(err.message)}</div>`);
-      msg.textContent = `${filePath} — ${err.message}`;
     }
   }
 }
@@ -1528,9 +1565,7 @@ function previewForVisualId(vid) {
   if (!v) { previewEffectId(0); return; }
   if (v.HasMissile && v.MissileModel > 0) return previewEffectId(v.MissileModel);
   for (const [field] of VISUAL_KIT_SLOTS) {
-    const k = v[field] > 0 ? rec('SpellVisualKit', v[field]) : null;
-    if (!k) continue;
-    const fx = [...KIT_SLOT_FIELDS.map(([f]) => k[f]), ...k.SpecialEffect, k.WorldEffect].find((x) => x > 0);
+    const fx = firstKitEffect(v[field]);
     if (fx) return previewEffectId(fx);
   }
   previewEffectId(0);
@@ -1786,13 +1821,16 @@ $('#chk-spin').addEventListener('change', (e) => Viewer.setSpin(e.target.checked
 $('#chk-particles').addEventListener('change', (e) => Viewer.setParticles(e.target.checked));
 {
   const rng = $('#rng-bright');
+  const lbl = $('#lbl-bright');
   const saved = Number(localStorage.getItem('previewBrightness'));
   if (saved >= 0.5 && saved <= 4) rng.value = saved;
-  Viewer.setBrightness(Number(rng.value));
-  rng.addEventListener('input', (e) => {
-    Viewer.setBrightness(Number(e.target.value));
-    localStorage.setItem('previewBrightness', e.target.value);
-  });
+  const applyBright = () => {
+    Viewer.setBrightness(Number(rng.value));
+    lbl.textContent = `${Number(rng.value).toFixed(1)}×`;
+    localStorage.setItem('previewBrightness', rng.value);
+  };
+  applyBright();
+  rng.addEventListener('input', applyBright);
 
   const BG_NAMES = ['dark', 'medium', 'light'];
   const btnBg = $('#btn-bg');

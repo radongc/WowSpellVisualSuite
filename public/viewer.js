@@ -283,6 +283,45 @@ const Viewer = (() => {
     gl.enable(gl.DEPTH_TEST);
   }
 
+  // Character/creature models carry every appearance variant as a separate
+  // geoset: id = group*100 + variant (group 0 body/hair, 1-3 facial hair,
+  // 4 hands/gloves, 5 feet/boots, 7 ears, 8 sleeves, 9 legcuffs, 10 chest,
+  // 11 pants, 12 tabard, 13 legs/robe, 15 cape...). The client draws one
+  // variant per group; drawing them all stacks every hairstyle, robe and boot
+  // on top of each other, which is what made the storyboard actor look like it
+  // was wearing the whole wardrobe (HumanMale: 56 batches, 3773 triangles).
+  //
+  // Variant 01 is the "nothing equipped" geometry — bare hands are 401, bare
+  // feet 501, bare legs 1301. Groups whose default is genuinely empty simply
+  // omit 01 (HumanMale has no 801/901/1001/1101/1201), so for characters
+  // "keep x01, else keep nothing" reproduces an unequipped body.
+  //
+  // Creatures reuse the numbering but not that convention — Banshee's only
+  // group-4 geoset is 402, and it's 1008 of its 1626 triangles. So for
+  // non-characters keep the lowest variant present in each group instead,
+  // which drops duplicate variants without deleting geometry that has no
+  // alternative. Spell/effect models are all geoset 0 — no-op either way.
+  function visibleGeosets(batches, isCharacter) {
+    const lowest = new Map();
+    let hairStyle = 0; // group 0 holds the body at id 0 and hairstyles at 1..n
+    for (const b of batches) {
+      const g = b.geoset || 0;
+      const group = Math.floor(g / 100);
+      if (!lowest.has(group) || g < lowest.get(group)) lowest.set(group, g);
+      if (group === 0 && g > 0 && (!hairStyle || g < hairStyle)) hairStyle = g;
+    }
+    const wanted = (g) => {
+      const group = Math.floor(g / 100);
+      // id 0 is the body (with a bald scalp); give characters the first
+      // hairstyle too, otherwise every actor is bald
+      if (group === 0) return g === 0 || (isCharacter && g === hairStyle);
+      return isCharacter ? g === group * 100 + 1 : g === lowest.get(group);
+    };
+    const kept = batches.filter((b) => wanted(b.geoset || 0));
+    // a model that numbers its geosets some other way still has to render
+    return kept.length ? kept : batches;
+  }
+
   function applyBlend(mode) {
     switch (mode) {
       case 0: gl.disable(gl.BLEND); return { alphaTest: 0, depthWrite: true };
@@ -496,6 +535,7 @@ const Viewer = (() => {
       let batches = (geom.batches && geom.batches.length ? geom.batches : [
         { indexStart: 0, indexCount: idx.length, texture: -1, blend: 0, unlit: false, twoSided: true },
       ]).slice();
+      batches = visibleGeosets(batches, !!geom.isCharacter);
       batches.sort((a, b) => (a.blend >= 2 ? 1 : 0) - (b.blend >= 2 ? 1 : 0));
       mesh = {
         vbo: mkBuf(gl.ARRAY_BUFFER, pos),

@@ -253,6 +253,10 @@ function resolveModelSkins(geom, vpath) {
   if (!geom.textures) return;
   const needCreature = geom.textures.some((t) => t.type >= 11 && !t.fileName);
   const needChar = geom.textures.some((t) => (t.type === 1 || t.type === 6) && !t.fileName);
+  // a body/hair composite slot is what makes this a player-character model —
+  // the viewer needs to know, because their geosets follow the equipment
+  // convention (see visibleGeosets in viewer.js)
+  geom.isCharacter = needChar;
   if (!needCreature && !needChar) return;
 
   const clean = String(vpath).replace(/\//g, '\\');
@@ -264,8 +268,16 @@ function resolveModelSkins(geom, vpath) {
   // full-body skin: <ModelName>Skin00_00.blp, else first non-region *Skin00_00
   const bodySkin = blps.find((b) => b.toLowerCase().endsWith(`${modelBase}skin00_00.blp`))
     || blps.find((b) => /skin00_00\.blp$/i.test(b) && !/naked|face|extra|scalp|hair|underwear/i.test(b));
-  const hairTex = blps.find((b) => /scalplowerhair00_00\.blp$/i.test(b))
-    || blps.find((b) => /hair00_00\.blp$/i.test(b));
+  // Hair lives one level up, in the race folder (Character\Human\Hair00_00.blp)
+  // rather than beside the model, so search the parent too or the hair geoset
+  // renders untextured. Hair00_00 is the hair mesh's own texture; the
+  // ScalpLowerHair variant is the scalp patch and is only a fallback.
+  const parentDir = dir.replace(/\\[^\\]*$/, '');
+  const hairPool = parentDir && parentDir !== dir
+    ? blps.concat(mpq.blpsInDir(parentDir).map((f) => f.path)).sort()
+    : blps;
+  const hairTex = hairPool.find((b) => /\\hair00_00\.blp$/i.test(b))
+    || hairPool.find((b) => /scalplowerhair00_00\.blp$/i.test(b));
 
   let ci = 0;
   for (const t of geom.textures) {
@@ -599,7 +611,13 @@ function serveStatic(req, res, pathname) {
     res.writeHead(404, { 'Content-Type': 'text/plain' });
     return res.end('not found');
   }
-  res.writeHead(200, { 'Content-Type': MIME[path.extname(file).toLowerCase()] || 'application/octet-stream' });
+  // No validators here meant browsers fell back to heuristic caching and could
+  // serve a stale app.js/viewer.js after an edit — with no way to tell from the
+  // page. It's a localhost tool serving a few small files, so never cache.
+  res.writeHead(200, {
+    'Content-Type': MIME[path.extname(file).toLowerCase()] || 'application/octet-stream',
+    'Cache-Control': 'no-store, must-revalidate',
+  });
   fs.createReadStream(file).pipe(res);
 }
 
