@@ -522,6 +522,8 @@ const Viewer = (() => {
       T: makeTransform(item.transform),
       rawTransform: item.transform || null,
       skel: null, animSeq: -1, animT0: 0,
+      follow: item.follow || null, // { host: modelIdx, bone, pos, yaw } — track a host bone
+      poseValid: false,
     };
 
     // skeleton + skinning setup
@@ -892,11 +894,32 @@ const Viewer = (() => {
               R[0][2] * up[0] + R[1][2] * up[1] + R[2][2] * up[2]];
       }
       computePose(md, now, br, bu);
+      md.poseValid = true;
       skinModel(md);
       gl.bindBuffer(gl.ARRAY_BUFFER, md.mesh.vbo);
       gl.bufferSubData(gl.ARRAY_BUFFER, 0, md.skin.outPos);
       gl.bindBuffer(gl.ARRAY_BUFFER, md.mesh.nbo);
       gl.bufferSubData(gl.ARRAY_BUFFER, 0, md.skin.outNrm);
+    }
+
+    // bone-followers: re-anchor to the host's animated attachment bone so
+    // effects ride the hands/chest through the animation
+    for (const md of models) {
+      if (!md.follow) continue;
+      const host = models[md.follow.host];
+      if (!host) continue;
+      const f = md.follow;
+      let p = f.pos;
+      if (host.poseValid && host.skel && f.bone >= 0 && f.bone < host.skel.bones.length) {
+        const W = host.boneMats, o = f.bone * 12;
+        p = [
+          W[o] * f.pos[0] + W[o + 1] * f.pos[1] + W[o + 2] * f.pos[2] + W[o + 3],
+          W[o + 4] * f.pos[0] + W[o + 5] * f.pos[1] + W[o + 6] * f.pos[2] + W[o + 7],
+          W[o + 8] * f.pos[0] + W[o + 9] * f.pos[1] + W[o + 10] * f.pos[2] + W[o + 11],
+        ];
+      }
+      const world = xfPoint(host.T, p[0], p[1], p[2]);
+      md.T = makeTransform({ offset: world, yaw: f.yaw || 0, scale: f.scale || 1 });
     }
 
     for (const md of models) if (md.mesh && md.visible) drawMesh(md, mvp);

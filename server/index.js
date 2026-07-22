@@ -79,7 +79,18 @@ route('GET', /^\/api\/status$/, (req, res) => {
     gamedataPresent: fs.existsSync(GAMEDATA_DIR),
     mpq: mpq.list(),
     dirty: store.dirtyTables(),
+    history: store.historyInfo(),
     tables: store.status,
+  });
+});
+
+route('POST', /^\/api\/(undo|redo)$/, (req, res, m) => {
+  const entry = m[1] === 'undo' ? store.undo() : store.redo();
+  if (!entry) return sendJson(res, 404, { error: `nothing to ${m[1]}` });
+  sendJson(res, 200, {
+    label: entry.label,
+    tables: [...new Set(entry.ops.map((o) => o.table))],
+    history: store.historyInfo(),
   });
 });
 
@@ -489,6 +500,33 @@ route('GET', /^\/api\/models$/, (req, res, m, url) => {
     dirs,
     records: matches.slice(offset, offset + limit),
   });
+});
+
+// Spell icon as PNG (SpellIcon.dbc -> BLP from archives), cached.
+const { encodePNG } = require('./png');
+const iconCache = new Map();
+route('GET', /^\/api\/icon\/(\d+)$/, (req, res, m) => {
+  const id = Number(m[1]);
+  if (iconCache.has(id)) {
+    const png = iconCache.get(id);
+    if (!png) return sendJson(res, 404, { error: 'icon unavailable' });
+    res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'max-age=3600' });
+    return res.end(png);
+  }
+  const rec = store.getRecord('SpellIcon', id);
+  const vpath = rec && rec.TextureFilename ? rec.TextureFilename.replace(/\.blp$/i, '') + '.blp' : null;
+  const hit = vpath ? readGameFile(vpath) : null;
+  if (!hit) { iconCache.set(id, null); return sendJson(res, 404, { error: `icon #${id} not found` }); }
+  try {
+    const img = decodeBLP(hit.data);
+    const png = encodePNG(img.width, img.height, img.rgba);
+    iconCache.set(id, png);
+    res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'max-age=3600' });
+    res.end(png);
+  } catch (e) {
+    iconCache.set(id, null);
+    sendJson(res, 422, { error: e.message });
+  }
 });
 
 // Decoded BLP texture as raw RGBA bytes (dimensions in headers).

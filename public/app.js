@@ -157,7 +157,30 @@ async function refreshStatus() {
     const dirty = state.status.dirty || [];
     $('#dirty-indicator').hidden = dirty.length === 0;
     $('#dirty-tables').textContent = dirty.join(', ');
+    const h = state.status.history || {};
+    const bu = $('#btn-undo'), br = $('#btn-redo');
+    bu.disabled = !h.undoCount;
+    br.disabled = !h.redoCount;
+    bu.title = h.nextUndo ? `Undo: ${h.nextUndo} (Ctrl+Z)` : 'Undo (Ctrl+Z)';
+    br.title = h.nextRedo ? `Redo: ${h.nextRedo} (Ctrl+Y)` : 'Redo (Ctrl+Y)';
   } catch (e) { /* server down; leave as-is */ }
+}
+
+async function doUndoRedo(kind) {
+  try {
+    const r = await api(`/api/${kind}`, { method: 'POST' });
+    for (const t of r.tables) {
+      if (state.tables[t]) await loadTable(t);
+    }
+    buildDatalists();
+    await refreshStatus();
+    renderList();
+    renderEditor();
+    toast(`${kind === 'undo' ? 'Undid' : 'Redid'}: ${r.label}`);
+  } catch (e) {
+    if (e.status === 404) toast(`Nothing to ${kind}.`);
+    else toast(`${kind} failed: ${e.message}`, true);
+  }
 }
 
 // ---------- sidebar list ----------
@@ -183,7 +206,13 @@ async function renderList(append = false) {
     const page = await api(`/api/spells?q=${encodeURIComponent(q)}&offset=${offset}&limit=100`);
     state.spellPage = { ...page, offset };
     for (const s of page.records) {
-      list.append(listItem('spell', s.ID, s.name || '(unnamed)', s.rank || ''));
+      const item = listItem('spell', s.ID, s.name || '(unnamed)', s.rank || '');
+      if (s.icon > 0) {
+        const img = el('img', { class: 'spell-icon', src: `/api/icon/${s.icon}`, loading: 'lazy' });
+        img.onerror = () => img.remove();
+        item.prepend(img);
+      }
+      list.append(item);
     }
     more.hidden = offset + 100 >= page.total;
     return;
@@ -417,8 +446,12 @@ async function renderSpellEditor(content, id) {
     content.append(el('div', { class: 'banner' }, `Could not load spell #${id}: ${e.message}`));
     return;
   }
+  const headIcon = spell.SpellIconID > 0
+    ? el('img', { class: 'spell-icon-lg', src: `/api/icon/${spell.SpellIconID}` }) : null;
+  if (headIcon) headIcon.onerror = () => headIcon.remove();
   content.append(
     el('div', { class: 'ed-head' },
+      headIcon,
       el('h2', {}, spell.Name.enUS || '(unnamed spell)'),
       el('span', { class: 'id-badge' }, `#${spell.ID}`),
       spell.NameSubtext.enUS ? el('span', { class: 'sub' }, spell.NameSubtext.enUS) : null),
@@ -439,7 +472,20 @@ async function renderSpellEditor(content, id) {
         el('button', {
           title: 'Clone visual 1 with all its kits and effects, and point this spell at the new copy — ready to customize without touching the original',
           onclick: () => cloneChain(spell.SpellVisualID[0], spell.ID, 0),
-        }, `Clone chain of visual #${spell.SpellVisualID[0]} → assign to this spell`)) : null));
+        }, `Clone chain of visual #${spell.SpellVisualID[0]} → assign to this spell`)) :
+      el('div', { style: 'margin-top:8px' },
+        el('button', {
+          title: 'Create an empty SpellVisual, assign it as Visual 1, and open it so you can add kits',
+          onclick: async () => {
+            try {
+              const id = await createLinkedRecord('SpellVisual', null);
+              spell.SpellVisualID[0] = id;
+              scheduleSave('Spell', spell);
+              toast(`Created visual #${id}, assigned to this spell.`);
+              select('visual', id, [crumbFor(state.selection)]);
+            } catch (e2) { toast('Create failed: ' + e2.message, true); }
+          },
+        }, '+ Create new visual → assign to this spell'))));
 
   // inline visual chain for visual 1
   const vid = spell.SpellVisualID[0];
@@ -516,11 +562,23 @@ function renderVisualBody(content, v, compact) {
   const grid = el('div', { class: 'slot-grid' });
   for (const [field, label, hint] of VISUAL_KIT_SLOTS) {
     const kid = v[field];
-    const kit = kid > 0 ? rec('SpellVisualKit', kid) : null;
     const slot = el('div', { class: 'slot' + (kid > 0 ? '' : ' empty-slot') },
       el('div', { class: 'slot-name' },
         el('span', {}, label),
-        kid > 0 ? el('a', { onclick: () => select('kit', kid, [...state.crumbs, crumbFor(state.selection)]) }, `kit #${kid} ↗`) : null),
+        kid > 0
+          ? el('a', { onclick: () => select('kit', kid, [...state.crumbs, crumbFor(state.selection)]) }, `kit #${kid} ↗`)
+          : el('a', {
+            title: `Create a blank kit and assign it as this visual's ${label} kit`,
+            onclick: async () => {
+              try {
+                const id = await createLinkedRecord('SpellVisualKit', NEW_KIT_DEFAULTS);
+                v[field] = id;
+                scheduleSave('SpellVisual', v);
+                toast(`Created kit #${id}, assigned as ${label}.`);
+                select('kit', id, [...state.crumbs, crumbFor(state.selection)]);
+              } catch (e2) { toast('Create failed: ' + e2.message, true); }
+            },
+          }, '+ new kit')),
       refField(v, 'SpellVisual', field, hint, REFS.kit, { after: () => renderEditor() }));
     grid.append(slot);
   }
@@ -601,7 +659,28 @@ function renderKitEditor(content, id) {
     const val = s.index != null ? k[s.field][s.index] : k[s.field];
     grid.append(el('div', { class: 'slot' + (val > 0 ? '' : ' empty-slot') },
       el('div', { class: 'slot-name' }, el('span', {}, s.label),
-        val > 0 ? el('a', { onclick: () => previewEffectId(val) }, 'preview') : null),
+        val > 0
+          ? el('a', { onclick: () => previewEffectId(val) }, 'preview')
+          : el('a', {
+            title: 'Create a new effect in this slot and pick its model from the browser',
+            onclick: async () => {
+              try {
+                const eid = await createLinkedRecord('SpellVisualEffectName', { Name: `New ${s.label} effect`, Scale: 1 });
+                if (s.index != null) k[s.field][s.index] = eid;
+                else k[s.field] = eid;
+                scheduleSave('SpellVisualKit', k);
+                toast(`Created effect #${eid} in the ${s.label} slot — pick a model.`);
+                select('effect', eid, [...state.crumbs, crumbFor(state.selection)]);
+                openModelBrowser((path) => {
+                  const e2 = rec('SpellVisualEffectName', eid);
+                  if (!e2) return;
+                  e2.FileName = path;
+                  scheduleSave('SpellVisualEffectName', e2);
+                  renderEditor();
+                });
+              } catch (e2) { toast('Create failed: ' + e2.message, true); }
+            },
+          }, '+ new')),
       refField(k, 'SpellVisualKit', s.field, 'Effect (-1 = none)', REFS.effect, {
         index: s.index, after: (v2) => { if (v2 > 0) previewEffectId(v2); },
       })));
@@ -744,6 +823,29 @@ function renderEffectEditor(content, id) {
       numField(e, 'SpellVisualEffectName', 'Scale', 'Scale', { float: true }))));
 
   if (!lab) previewEffectId(id);
+}
+
+// ---------- create-and-assign helpers ----------
+
+// Blank kits should use -1 ("none") in effect/proc slots, matching the data convention.
+const NEW_KIT_DEFAULTS = {
+  KitType: 0, AnimID: 32, // SpellCast
+  HeadEffect: -1, ChestEffect: -1, BaseEffect: -1,
+  LeftHandEffect: -1, RightHandEffect: -1, BreathEffect: -1,
+  SpecialEffect: [-1, -1, -1], WorldEffect: -1,
+  SoundID: 0, ShakeID: 0, CharProc: [-1, -1, -1, -1],
+};
+
+async function createLinkedRecord(table, defaults) {
+  const recNew = await api(`/api/table/${table}`, { method: 'POST', body: {} });
+  if (defaults) {
+    Object.assign(recNew, JSON.parse(JSON.stringify(defaults)));
+    await api(`/api/table/${table}/${recNew.ID}`, { method: 'PUT', body: recNew });
+  }
+  await loadTable(table);
+  buildDatalists();
+  refreshStatus();
+  return recNew.ID;
 }
 
 // ---------- deep clone ----------
@@ -983,11 +1085,15 @@ const KIT_SLOT_ATTACH = {
 };
 
 function attachPosOf(charGeom, ids) {
+  return attachInfoOf(charGeom, ids).pos;
+}
+
+function attachInfoOf(charGeom, ids) {
   for (const id of ids) {
     const a = (charGeom.attachments || []).find((x) => x.id === id);
-    if (a) return a.pos;
+    if (a) return { pos: a.pos, bone: a.bone };
   }
-  return [0, 0, 1];
+  return { pos: [0, 0, 1], bone: -1 };
 }
 
 function seqIndexForAnim(charGeom, animIds) {
@@ -1076,10 +1182,16 @@ async function openStoryboard(visualId, spell) {
     const g = await fxGeom(f.effectId);
     if (!g || (g.particleOnly && !(g.particles || []).length)) continue;
     const base = f.tgt === 'caster' ? casterPos : targetPos;
-    const ap = attachPosOf(cg, f.attachIds);
+    const info = attachInfoOf(cg, f.attachIds);
+    const hostMi = f.tgt === 'caster' ? 0 : targetMi;
     const yaw = f.tgt === 'target' && !selfCast ? Math.PI : 0;
-    const rp = yaw ? [-ap[0], -ap[1], ap[2]] : ap;
-    items.push({ geom: g, visible: false, transform: { offset: [base[0] + rp[0], base[1] + rp[1], base[2] + rp[2]], yaw } });
+    const rp = yaw ? [-info.pos[0], -info.pos[1], info.pos[2]] : info.pos;
+    items.push({
+      geom: g, visible: false,
+      transform: { offset: [base[0] + rp[0], base[1] + rp[1], base[2] + rp[2]], yaw },
+      // ride the host's animated attachment bone (hands raise → effect follows)
+      follow: { host: hostMi, bone: info.bone, pos: info.pos, yaw },
+    });
     fxModels.push({ mi: items.length - 1, phase: f.phase });
   }
 
@@ -1396,6 +1508,16 @@ function previewForVisualId(vid) {
 // ---------- toolbar actions ----------
 
 $('#btn-save').addEventListener('click', () => openFileDialog());
+$('#btn-undo').addEventListener('click', () => doUndoRedo('undo'));
+$('#btn-redo').addEventListener('click', () => doUndoRedo('redo'));
+document.addEventListener('keydown', (e) => {
+  if (!(e.ctrlKey || e.metaKey)) return;
+  // let text fields keep their native input-level undo
+  const tag = (e.target.tagName || '').toLowerCase();
+  if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+  if (e.key === 'z' && !e.shiftKey) { e.preventDefault(); doUndoRedo('undo'); }
+  else if (e.key === 'y' || (e.key === 'z' && e.shiftKey) || e.key === 'Z') { e.preventDefault(); doUndoRedo('redo'); }
+});
 
 // Discard in-memory edits to specific tables (server reloads them from
 // disk/archives), then refresh everything client-side.

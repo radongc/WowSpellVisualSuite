@@ -73,6 +73,8 @@ button.danger:hover:not(:disabled) { border-color: var(--danger); color: var(--d
 .list-item:hover { background: var(--bg3); }
 .list-item.selected { background: var(--bg3); border-left-color: var(--accent); }
 .list-item .id { font-family: var(--mono); font-size: 11px; color: var(--muted); min-width: 44px; }
+.spell-icon { width: 18px; height: 18px; border-radius: 3px; align-self: center; flex-shrink: 0; }
+.spell-icon-lg { width: 36px; height: 36px; border-radius: 5px; border: 1px solid var(--border); align-self: center; }
 .list-item .nm { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .list-item .sub { font-size: 11px; color: var(--muted); }
 .list-more { padding: 8px; }

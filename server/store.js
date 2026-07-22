@@ -7,13 +7,94 @@ const { SCHEMAS } = require('./schemas');
 const DBC_DIR = path.join(__dirname, '..', 'dbc');
 const BACKUP_DIR = path.join(DBC_DIR, 'backup');
 
+const HISTORY_CAP = 200;
+const copy = (v) => JSON.parse(JSON.stringify(v));
+
 class Store {
   constructor() {
     this.tables = {};   // name -> { records, byId: Map, dirty: bool }
     this.status = {};   // name -> { state: 'ok'|'missing'|'error', error?, recordCount? }
+    this.undoStack = []; // [{ label, ops: [{type, table, id, before?, after?, record?}] }]
+    this.redoStack = [];
+    this._txn = null;
+  }
+
+  // --- undo/redo history (record edits only; file ops clear it) ---
+
+  clearHistory() {
+    this.undoStack.length = 0;
+    this.redoStack.length = 0;
+    this._txn = null;
+  }
+
+  _pushOp(op, label) {
+    if (this._txn) { this._txn.ops.push(op); return; }
+    this.undoStack.push({ label, ops: [op] });
+    if (this.undoStack.length > HISTORY_CAP) this.undoStack.shift();
+    this.redoStack.length = 0;
+  }
+
+  beginTxn(label) { this._txn = { label, ops: [] }; }
+
+  commitTxn() {
+    if (this._txn && this._txn.ops.length) {
+      this.undoStack.push(this._txn);
+      if (this.undoStack.length > HISTORY_CAP) this.undoStack.shift();
+      this.redoStack.length = 0;
+    }
+    this._txn = null;
+  }
+
+  _setRecord(name, id, data) {
+    const t = this.tables[name];
+    if (!t) return;
+    if (data == null) {
+      t.byId.delete(id);
+      t.records = t.records.filter((r) => r.ID !== id);
+    } else {
+      const rec = copy(data);
+      const i = t.records.findIndex((r) => r.ID === id);
+      if (i >= 0) t.records[i] = rec;
+      else t.records.push(rec);
+      t.byId.set(id, rec);
+    }
+    t.dirty = true;
+    if (this.status[name]) this.status[name].recordCount = t.records.length;
+  }
+
+  _applyOp(op, dir) {
+    if (op.type === 'update') this._setRecord(op.table, op.id, dir === 'undo' ? op.before : op.after);
+    else if (op.type === 'create') this._setRecord(op.table, op.id, dir === 'undo' ? null : op.record);
+    else if (op.type === 'delete') this._setRecord(op.table, op.id, dir === 'undo' ? op.record : null);
+  }
+
+  undo() {
+    const entry = this.undoStack.pop();
+    if (!entry) return null;
+    for (let i = entry.ops.length - 1; i >= 0; i--) this._applyOp(entry.ops[i], 'undo');
+    this.redoStack.push(entry);
+    return entry;
+  }
+
+  redo() {
+    const entry = this.redoStack.pop();
+    if (!entry) return null;
+    for (const op of entry.ops) this._applyOp(op, 'redo');
+    this.undoStack.push(entry);
+    return entry;
+  }
+
+  historyInfo() {
+    return {
+      undoCount: this.undoStack.length,
+      redoCount: this.redoStack.length,
+      nextUndo: this.undoStack.length ? this.undoStack[this.undoStack.length - 1].label : null,
+      nextRedo: this.redoStack.length ? this.redoStack[this.redoStack.length - 1].label : null,
+    };
   }
 
   load() {
+    this.clearHistory();
     for (const name of Object.keys(SCHEMAS)) {
       const file = path.join(DBC_DIR, name + '.dbc');
       if (!fs.existsSync(file)) {
@@ -46,10 +127,14 @@ class Store {
     if (!t) throw new Error(`table ${name} not loaded`);
     const rec = t.byId.get(id);
     if (!rec) throw new Error(`${name} #${id} not found`);
+    const before = copy(rec);
     const schema = SCHEMAS[name];
     for (const fld of schema) {
       if (fld.name === 'ID' || !(fld.name in data)) continue;
       rec[fld.name] = data[fld.name];
+    }
+    if (JSON.stringify(before) !== JSON.stringify(rec)) {
+      this._pushOp({ type: 'update', table: name, id, before, after: copy(rec) }, `edit ${name} #${id}`);
     }
     t.dirty = true;
     return rec;
@@ -82,13 +167,27 @@ class Store {
     t.records.push(rec);
     t.byId.set(newId, rec);
     t.dirty = true;
+    this._pushOp({ type: 'create', table: name, id: newId, record: copy(rec) },
+      cloneFrom != null ? `clone ${name} #${cloneFrom} → #${newId}` : `create ${name} #${newId}`);
     return rec;
   }
 
   // Deep-clone a SpellVisual: the visual record itself, every kit it references,
   // and (optionally) every effect those kits/the visual reference. All internal
   // references are rewired to the new IDs. Returns an old->new ID map per table.
-  cloneVisualChain(visualId, { cloneEffects = true, spellId = null, spellSlot = 0 } = {}) {
+  cloneVisualChain(visualId, opts = {}) {
+    this.beginTxn(`clone visual chain #${visualId}`);
+    try {
+      const result = this._cloneVisualChain(visualId, opts);
+      this.commitTxn();
+      return result;
+    } catch (e) {
+      this._txn = null;
+      throw e;
+    }
+  }
+
+  _cloneVisualChain(visualId, { cloneEffects = true, spellId = null, spellSlot = 0 } = {}) {
     const visuals = this.tables.SpellVisual;
     const kits = this.tables.SpellVisualKit;
     if (!visuals || !kits) throw new Error('SpellVisual / SpellVisualKit not loaded');
@@ -105,7 +204,7 @@ class Store {
       const src = this.tables.SpellVisualEffectName && this.tables.SpellVisualEffectName.byId.get(oldId);
       if (!src) return oldId; // dangling ref — keep as-is
       const rec = this.createRecord('SpellVisualEffectName', { cloneFrom: oldId });
-      rec.Name = (src.Name || 'effect') + ' (copy)';
+      this.updateRecord('SpellVisualEffectName', rec.ID, { Name: (src.Name || 'effect') + ' (copy)' });
       effectMap.set(oldId, rec.ID);
       return rec.ID;
     };
@@ -133,9 +232,9 @@ class Store {
     if (spellId != null) {
       const spells = this.tables.Spell;
       if (!spells || !spells.byId.has(spellId)) throw new Error(`Spell #${spellId} not found`);
-      const spell = spells.byId.get(spellId);
-      spell.SpellVisualID[spellSlot === 1 ? 1 : 0] = newVisual.ID;
-      spells.dirty = true;
+      const vis = spells.byId.get(spellId).SpellVisualID.slice();
+      vis[spellSlot === 1 ? 1 : 0] = newVisual.ID;
+      this.updateRecord('Spell', spellId, { SpellVisualID: vis });
     }
 
     return {
@@ -149,6 +248,7 @@ class Store {
     const t = this.tables[name];
     if (!t) throw new Error(`table ${name} not loaded`);
     if (!t.byId.has(id)) throw new Error(`${name} #${id} not found`);
+    this._pushOp({ type: 'delete', table: name, id, record: copy(t.byId.get(id)) }, `delete ${name} #${id}`);
     t.byId.delete(id);
     t.records = t.records.filter((r) => r.ID !== id);
     t.dirty = true;
@@ -161,6 +261,7 @@ class Store {
   // Load a table from an in-memory buffer (e.g. a DBC read straight out of the
   // client's MPQ archives). Used to auto-fill tables missing from dbc/.
   loadFromBuffer(name, buf, source) {
+    this.clearHistory();
     const { records } = dbc.parse(buf, SCHEMAS[name], name);
     const byId = new Map(records.map((r) => [r.ID, r]));
     this.tables[name] = { records, byId, dirty: false };
@@ -170,6 +271,7 @@ class Store {
   // Drop in-memory edits to one table by re-reading it from dbc/. Returns false
   // if there is no disk file (caller may fall back to the MPQ chain).
   reloadTable(name) {
+    this.clearHistory();
     if (!SCHEMAS[name]) throw new Error(`unknown table ${name}`);
     const file = path.join(DBC_DIR, name + '.dbc');
     if (!fs.existsSync(file)) return false;
@@ -192,6 +294,7 @@ class Store {
   // Validate and install an uploaded .dbc: parse against the schema first, back
   // up the existing file, write, and reload the table into memory.
   importTable(name, buf) {
+    this.clearHistory();
     if (!SCHEMAS[name]) throw new Error(`unknown table ${name}`);
     const { records } = dbc.parse(buf, SCHEMAS[name], name); // throws if invalid
     const file = path.join(DBC_DIR, name + '.dbc');
