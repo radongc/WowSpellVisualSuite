@@ -7,6 +7,8 @@ your client's MPQ archives, so you can *see* a spell before you ship it.
 
 You supply your own 1.12.1 client; the tool reads it locally. See [Game data](#game-data).
 
+<img width="2055" height="1225" alt="brave_1FJ2yElhjo" src="https://github.com/user-attachments/assets/bda5b4e4-1ce0-443b-ae3a-0c88d2562e8e" />
+
 ## Features
 
 - **Full visual-chain editing** — Spell → SpellVisual (precast / cast / impact / state /
