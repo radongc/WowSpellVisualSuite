@@ -1,0 +1,37 @@
+# SpellVisualKit.dbc structure for 1.12.1 — corrected vanilla layout
+# from the WoW 1.12.1 Spell Visual Suite (verified against real client bytes).
+int ID
+int KitType
+int AnimID
+int HeadEffect
+int ChestEffect
+int BaseEffect
+int LeftHandEffect
+int RightHandEffect
+int BreathEffect
+int SpecialEffect1
+int SpecialEffect2
+int SpecialEffect3
+int WorldEffect
+int SoundID
+int ShakeID
+int CharProc1
+int CharProc2
+int CharProc3
+int CharProc4
+float CharParamZero1
+float CharParamZero2
+float CharParamZero3
+float CharParamZero4
+float CharParamOne1
+float CharParamOne2
+float CharParamOne3
+float CharParamOne4
+float CharParamTwo1
+float CharParamTwo2
+float CharParamTwo3
+float CharParamTwo4
+float CharParamThree1
+float CharParamThree2
+float CharParamThree3
+float CharParamThree4

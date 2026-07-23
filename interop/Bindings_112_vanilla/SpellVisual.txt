@@ -1,0 +1,18 @@
+# SpellVisual.dbc structure for 1.12.1 — corrected vanilla layout
+# from the WoW 1.12.1 Spell Visual Suite (verified against real client bytes).
+int ID
+int PrecastKit
+int CastKit
+int ImpactKit
+int StateKit
+int ChannelKit
+int HasMissile
+int MissileModel
+int MissilePathType
+int MissileDestinationAttachment
+int MissileSound
+int HasAreaEffect
+int AreaModel
+int AreaKit
+int AnimEventSoundID
+int MissileAttachment

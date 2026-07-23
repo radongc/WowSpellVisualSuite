@@ -11,11 +11,17 @@ const { decodeBLP } = require('./blp');
 const { buildMpq } = require('./mpqwrite');
 const { buildZip } = require('./zipwrite');
 const mpq = require('./mpq');
+const mysqldb = require('./mysqldb');
 
 const PORT = Number(process.env.PORT) || 3414;
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 // Drop extracted MPQ contents (Spells\, Creature\, etc.) here to enable 3D previews.
 const GAMEDATA_DIR = process.env.GAMEDATA_DIR || path.join(__dirname, '..', 'gamedata');
+// Optional: path to a WoW client's Data folder, so patch exports can drop straight in.
+const CLIENT_DIR = process.env.CLIENT_DIR || '';
+// Tables shared with (and written back to) Stoneharry's MySQL when configured.
+// The three visual tables plus Spell (for its SpellVisual1/2 pointers).
+const MYSQL_TABLES = ['Spell', 'SpellVisual', 'SpellVisualKit', 'SpellVisualEffectName'];
 
 const store = new Store();
 store.load();
@@ -81,6 +87,9 @@ route('GET', /^\/api\/status$/, (req, res) => {
     dirty: store.dirtyTables(),
     history: store.historyInfo(),
     tables: store.status,
+    backend: store.mysqlTables.size ? 'mysql' : 'file',
+    mysqlTables: [...store.mysqlTables],
+    clientDir: CLIENT_DIR || null,
   });
 });
 
@@ -178,9 +187,15 @@ route('POST', /^\/api\/clone-visual-chain$/, async (req, res) => {
   sendJson(res, 200, result);
 });
 
-route('POST', /^\/api\/save$/, (req, res) => {
+route('POST', /^\/api\/save$/, async (req, res) => {
+  // MySQL-backed tables flush to the shared database; everything else to dbc/.
+  let mysql = null;
+  if (store.mysqlTables.size) {
+    try { mysql = await store.saveToMysql(mysqldb); }
+    catch (e) { return sendJson(res, 500, { error: `MySQL save failed: ${e.message}` }); }
+  }
   const result = store.save();
-  sendJson(res, 200, result);
+  sendJson(res, 200, { ...result, mysql });
 });
 
 // Any table missing from dbc/ is filled from the client's archives — this is
@@ -205,6 +220,11 @@ route('POST', /^\/api\/discard$/, async (req, res) => {
   const discarded = [], failed = [];
   for (const name of targets) {
     try {
+      if (store.mysqlTables.has(name)) {
+        await store.loadFromMysql(mysqldb, [name]);
+        discarded.push(name);
+        continue;
+      }
       if (store.reloadTable(name)) { discarded.push(name); continue; }
       const hit = mpq.readFile(`DBFilesClient\\${name}.dbc`);
       if (hit) {
@@ -223,10 +243,12 @@ route('POST', /^\/api\/discard$/, async (req, res) => {
 route('POST', /^\/api\/reload$/, async (req, res) => {
   store.tables = {};
   store.status = {};
+  store.mysqlTables = new Set();
   store.load();
   await mpq.init(GAMEDATA_DIR);
   loadTablesFromArchives();
-  sendJson(res, 200, { ok: true, tables: store.status, mpq: mpq.list() });
+  await loadFromMysql();
+  sendJson(res, 200, { ok: true, tables: store.status, mpq: mpq.list(), backend: store.mysqlTables.size ? 'mysql' : 'file' });
 });
 
 // Audition a SoundEntries record: serves one of its files from the archives.
@@ -475,26 +497,77 @@ route('POST', /^\/api\/bake-m2$/, async (req, res) => {
   sendJson(res, 200, { outPath: cleanOut, bytes: baked.length, source: src.source });
 });
 
-// Pack all loose files under gamedata/ (excluding .MPQ archives) into a fresh
-// patch archive the 1.12 client can load. ?dbc=1 also embeds the current
-// in-memory Spell* DBCs under DBFilesClient\.
-route('GET', /^\/api\/export-patch$/, (req, res, m, url) => {
+// Collect loose gamedata files (+ optionally the in-memory DBCs) for a patch.
+function buildPatchFiles(includeDbc) {
   const files = listLooseFiles()
     .filter((f) => f.size < 100 * 1024 * 1024)
     .map((f) => ({ name: f.path, data: fs.readFileSync(f.full) }));
-  if (url.searchParams.get('dbc') === '1') {
+  if (includeDbc) {
     for (const name of Object.keys(store.tables)) {
       files.push({ name: `DBFilesClient\\${name}.dbc`, data: store.serializeTable(name) });
     }
   }
+  return files;
+}
+
+// The next patch archive name that would OUTRANK everything already in `dir`.
+// Client load order: base < patch < patch-2..9 < patch-A..Z (higher wins). We
+// return the next free letter above the highest present — so the export is the
+// one the client actually loads, instead of the old hardcoded patch-3.MPQ that
+// silently lost to any patch-4/A..Z already installed.
+function nextPatchName(dir) {
+  let maxLetter = 0;
+  try {
+    for (const f of fs.readdirSync(dir)) {
+      const mm = f.toLowerCase().match(/^patch-([a-z])\.mpq$/);
+      if (mm) maxLetter = Math.max(maxLetter, mm[1].charCodeAt(0) - 96); // a=1
+    }
+  } catch (e) { /* dir missing — start at A */ }
+  const next = Math.min(maxLetter + 1, 26);
+  return `patch-${String.fromCharCode(64 + next)}.MPQ`; // A..Z, above all numbered patches
+}
+
+// Download a patch archive (loose files + optionally the DBCs). ?dbc=1 embeds
+// the current in-memory DBCs under DBFilesClient\. Filename is the next winning
+// patch letter for wherever you'll drop it (client dir if configured).
+route('GET', /^\/api\/export-patch$/, (req, res, m, url) => {
+  const files = buildPatchFiles(url.searchParams.get('dbc') === '1');
   if (!files.length) return sendJson(res, 404, { error: 'no loose files under gamedata to pack' });
-  const archive = buildMpq(files);
+  const name = nextPatchName(CLIENT_DIR || GAMEDATA_DIR);
   res.writeHead(200, {
     'Content-Type': 'application/octet-stream',
-    'Content-Disposition': 'attachment; filename="patch-3.MPQ"',
+    'Content-Disposition': `attachment; filename="${name}"`,
     'X-File-Count': String(files.length),
   });
-  res.end(archive);
+  res.end(buildMpq(files));
+});
+
+// Write the patch straight into the configured WoW client Data folder, so you
+// skip the download-and-move step. Defaults to embedding the DBCs and to the
+// next winning patch letter; ?name=patch-X.MPQ overrides (e.g. to keep updating
+// one managed patch). Never touches archives you maintain by hand.
+route('POST', /^\/api\/deploy-patch$/, async (req, res) => {
+  if (!CLIENT_DIR) return sendJson(res, 400, { error: 'CLIENT_DIR is not set — start the server with CLIENT_DIR pointed at your WoW Data folder to enable deploy.' });
+  if (!fs.existsSync(CLIENT_DIR) || !fs.statSync(CLIENT_DIR).isDirectory()) {
+    return sendJson(res, 400, { error: `CLIENT_DIR is not a directory: ${CLIENT_DIR}` });
+  }
+  const body = await readBody(req);
+  const includeDbc = body.dbc !== false;
+  const files = buildPatchFiles(includeDbc);
+  if (!files.length) return sendJson(res, 404, { error: 'nothing to pack (no loose files or DBC tables)' });
+  let name = nextPatchName(CLIENT_DIR);
+  if (body.name) {
+    if (!/^patch-[0-9a-z]\.mpq$/i.test(String(body.name))) {
+      return sendJson(res, 400, { error: 'name must look like patch-X.MPQ' });
+    }
+    name = String(body.name);
+  }
+  const dest = path.join(CLIENT_DIR, name);
+  if (!path.resolve(dest).startsWith(path.resolve(CLIENT_DIR))) {
+    return sendJson(res, 400, { error: 'bad name' });
+  }
+  fs.writeFileSync(dest, buildMpq(files));
+  sendJson(res, 200, { written: dest, name, files: files.length, includedDbc: includeDbc });
 });
 
 // Browse every model available to the client: loose files under gamedata plus
@@ -637,6 +710,22 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+// When paired with Stoneharry's MySQL, override the shared tables with the
+// database copy so it becomes the single source of truth. Non-fatal: any
+// failure logs and leaves the file/archive data in place.
+async function loadFromMysql() {
+  if (!mysqldb.isConfigured()) return;
+  try {
+    await mysqldb.connect();
+    const loaded = await store.loadFromMysql(mysqldb, MYSQL_TABLES);
+    const cfg = mysqldb.config();
+    console.log(`  MySQL: ${cfg.user}@${cfg.host}:${cfg.port}/${cfg.database} — ` +
+      (loaded.length ? `backing ${loaded.join(', ')}` : 'connected, but no matching tables found'));
+  } catch (e) {
+    console.log(`  !! MySQL disabled: ${e.message}`);
+  }
+}
+
 async function main() {
   try {
     await mpq.init(GAMEDATA_DIR);
@@ -644,6 +733,7 @@ async function main() {
   } catch (e) {
     console.log(`  !! MPQ init failed: ${e.message}`);
   }
+  await loadFromMysql();
   server.listen(PORT, () => {
     const s = store.status;
     const ok = Object.keys(s).filter((n) => s[n].state === 'ok');

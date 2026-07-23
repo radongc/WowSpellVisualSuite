@@ -1615,6 +1615,10 @@ async function openFileDialog() {
   const dirty = (state.status && state.status.dirty) || [];
   const tables = (state.status && state.status.tables) || {};
   const loaded = Object.keys(tables).filter((n) => tables[n].state === 'ok');
+  const mysqlTables = (state.status && state.status.mysqlTables) || [];
+  const clientDir = (state.status && state.status.clientDir) || null;
+  const dirtyMysql = dirty.filter((n) => mysqlTables.includes(n));
+  const dirtyFile = dirty.filter((n) => !mysqlTables.includes(n));
 
   const backdrop = el('div', { class: 'modal-backdrop', onclick: (e) => { if (e.target === backdrop) close(); } });
   function close() {
@@ -1630,18 +1634,26 @@ async function openFileDialog() {
     ...children);
 
   // --- section: save to project dbc/ folder ---
+  // With MySQL paired, its tables flush to the shared database; any other dirty
+  // tables still write to dbc/. The confirm spells out exactly where each goes.
   const saveBtn = el('button', {
     class: 'primary', disabled: dirty.length === 0,
     onclick: async () => {
-      if (!confirm(`Overwrite ${dirty.length} file(s) in the project dbc/ folder?\n\n${dirty.map((d) => d + '.dbc').join('\n')}\n\nThe current files are backed up to dbc/backup/<timestamp>/ first.`)) return;
+      const parts = [];
+      if (dirtyMysql.length) parts.push(`${dirtyMysql.length} to MySQL (${dirtyMysql.join(', ')})`);
+      if (dirtyFile.length) parts.push(`${dirtyFile.length} to dbc/ (${dirtyFile.join(', ')})`);
+      if (!confirm(`Save changes?\n\n${parts.join('\n')}\n\ndbc/ files are backed up to dbc/backup/<timestamp>/ first.`)) return;
       try {
         const r = await api('/api/save', { method: 'POST' });
-        toast(`Saved ${r.saved.join(', ')} (backup: ${r.backupDir})`);
+        const bits = [];
+        if (r.mysql && r.mysql.saved.length) bits.push(`MySQL: ${r.mysql.saved.map((s) => `${s.table} (${s.upserted}↑${s.deleted ? ' ' + s.deleted + '✕' : ''})`).join(', ')}`);
+        if (r.saved.length) bits.push(`dbc/: ${r.saved.join(', ')}`);
+        toast(bits.join(' · ') || 'Nothing to save');
         refreshStatus();
         close();
       } catch (e2) { toast('Save failed: ' + e2.message, true); }
     },
-  }, dirty.length ? `Save ${dirty.length} modified table(s) to dbc/` : 'No unsaved changes');
+  }, dirty.length ? `Save ${dirty.length} modified table(s)` : 'No unsaved changes');
 
   const discardAllBtn = el('button', {
     class: 'danger', disabled: dirty.length === 0, style: 'margin-left:8px',
@@ -1687,10 +1699,21 @@ async function openFileDialog() {
 
   // --- section: patch MPQ ---
   const chkDbc = el('input', { type: 'checkbox', checked: '' });
-  const patchLink = el('a', { class: 'linkbtn', href: '/api/export-patch?dbc=1', download: '' }, '⬇ Download patch-3.MPQ');
+  const patchLink = el('a', { class: 'linkbtn', href: '/api/export-patch?dbc=1', download: '' }, '⬇ Download patch MPQ');
   chkDbc.addEventListener('change', () => {
     patchLink.href = chkDbc.checked ? '/api/export-patch?dbc=1' : '/api/export-patch';
   });
+  // Deploy straight into the client Data folder (only when CLIENT_DIR is set).
+  const deployBtn = clientDir ? el('button', {
+    style: 'margin-left:8px',
+    title: `Write the patch into ${clientDir} as the next winning patch letter`,
+    onclick: async () => {
+      try {
+        const r = await api('/api/deploy-patch', { method: 'POST', body: { dbc: chkDbc.checked } });
+        toast(`Deployed ${r.name} → ${r.written} (${r.files} files${r.includedDbc ? ', DBCs included' : ''})`);
+      } catch (e2) { toast('Deploy failed: ' + e2.message, true); }
+    },
+  }, '⤓ Deploy to client') : null;
 
   // --- section: import ---
   const importInput = el('input', { type: 'file', accept: '.dbc', multiple: '', style: 'display:none' });
@@ -1737,9 +1760,11 @@ async function openFileDialog() {
         'Raw files with their correct in-game paths, ready for manual MPQ editing.',
         looseList),
       section('Client patch MPQ',
-        'One ready-to-ship archive for your players.',
+        clientDir
+          ? `One ready-to-ship archive. Deploy writes it straight into ${clientDir} as the next winning patch letter; download to manage it yourself (e.g. in Ladik’s).`
+          : 'One ready-to-ship archive for your players. (Set CLIENT_DIR to enable one-click deploy into your client.)',
         el('label', { class: 'checkrow', style: 'margin-bottom:6px' }, chkDbc, ' include modified DBCs (DBFilesClient\\)'),
-        patchLink),
+        el('div', {}, patchLink, deployBtn)),
       section('Import DBC files',
         'Replace a project DBC with a file from elsewhere (e.g. a Spell.dbc edited in another tool). Validated against the 1.12.1 layout before anything is overwritten; the old file is backed up.',
         el('button', { onclick: () => importInput.click() }, 'Choose .dbc files…'),

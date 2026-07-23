@@ -12,11 +12,23 @@ const copy = (v) => JSON.parse(JSON.stringify(v));
 
 class Store {
   constructor() {
-    this.tables = {};   // name -> { records, byId: Map, dirty: bool }
+    this.tables = {};   // name -> { records, byId: Map, dirty: bool, dirtyIds?: Set, deletedIds?: Set }
     this.status = {};   // name -> { state: 'ok'|'missing'|'error', error?, recordCount? }
     this.undoStack = []; // [{ label, ops: [{type, table, id, before?, after?, record?}] }]
     this.redoStack = [];
     this._txn = null;
+    this.mysqlTables = new Set(); // tables sourced from (and saved back to) MySQL
+  }
+
+  // Track which rows changed so a MySQL save can upsert/delete just those,
+  // instead of rewriting an entire 22k-row table. Harmless in file mode.
+  _markRow(name, id, deleted) {
+    const t = this.tables[name];
+    if (!t) return;
+    t.dirtyIds = t.dirtyIds || new Set();
+    t.deletedIds = t.deletedIds || new Set();
+    if (deleted) { t.deletedIds.add(id); t.dirtyIds.delete(id); }
+    else { t.dirtyIds.add(id); t.deletedIds.delete(id); }
   }
 
   // --- undo/redo history (record edits only; file ops clear it) ---
@@ -59,6 +71,7 @@ class Store {
       t.byId.set(id, rec);
     }
     t.dirty = true;
+    this._markRow(name, id, data == null);
     if (this.status[name]) this.status[name].recordCount = t.records.length;
   }
 
@@ -135,6 +148,7 @@ class Store {
     }
     if (JSON.stringify(before) !== JSON.stringify(rec)) {
       this._pushOp({ type: 'update', table: name, id, before, after: copy(rec) }, `edit ${name} #${id}`);
+      this._markRow(name, id, false);
     }
     t.dirty = true;
     return rec;
@@ -167,6 +181,7 @@ class Store {
     t.records.push(rec);
     t.byId.set(newId, rec);
     t.dirty = true;
+    this._markRow(name, newId, false);
     this._pushOp({ type: 'create', table: name, id: newId, record: copy(rec) },
       cloneFrom != null ? `clone ${name} #${cloneFrom} → #${newId}` : `create ${name} #${newId}`);
     return rec;
@@ -252,10 +267,52 @@ class Store {
     t.byId.delete(id);
     t.records = t.records.filter((r) => r.ID !== id);
     t.dirty = true;
+    this._markRow(name, id, true);
   }
 
   dirtyTables() {
     return Object.keys(this.tables).filter((n) => this.tables[n].dirty);
+  }
+
+  // ---- MySQL backend (opt-in; pairs with Stoneharry's shared database) ----
+
+  // Replace the given tables' in-memory data with the MySQL copy. A table that
+  // MySQL lacks, or whose layout doesn't line up, is left untouched (keeps the
+  // file/archive copy). Populates mysqlTables so saves route back to MySQL.
+  async loadFromMysql(mysqldb, names) {
+    for (const name of names) {
+      if (!SCHEMAS[name]) continue;
+      let records;
+      try { records = await mysqldb.readTable(name, SCHEMAS[name]); }
+      catch (e) { console.log(`  !! MySQL read ${name}: ${e.message}`); continue; }
+      if (records == null) continue; // absent or layout mismatch — keep existing source
+      const byId = new Map(records.map((r) => [r.ID, r]));
+      this.tables[name] = { records, byId, dirty: false, dirtyIds: new Set(), deletedIds: new Set() };
+      this.status[name] = { state: 'ok', recordCount: records.length, source: 'mysql' };
+      this.mysqlTables.add(name);
+    }
+    this.clearHistory();
+    return [...this.mysqlTables];
+  }
+
+  // Push changed/new rows (and deletions) of every dirty MySQL-backed table back
+  // to the shared database. Only touched rows move, so this stays cheap even for
+  // Spell. Returns the list of tables written.
+  async saveToMysql(mysqldb) {
+    const saved = [];
+    for (const name of this.mysqlTables) {
+      const t = this.tables[name];
+      if (!t || !t.dirty) continue;
+      const upserts = [...(t.dirtyIds || [])].map((id) => t.byId.get(id)).filter(Boolean);
+      const deletes = [...(t.deletedIds || [])];
+      await mysqldb.upsertRows(name, SCHEMAS[name], upserts);
+      if (deletes.length) await mysqldb.deleteRows(name, SCHEMAS[name], deletes);
+      t.dirty = false;
+      t.dirtyIds = new Set();
+      t.deletedIds = new Set();
+      saved.push({ table: name, upserted: upserts.length, deleted: deletes.length });
+    }
+    return { saved };
   }
 
   // Load a table from an in-memory buffer (e.g. a DBC read straight out of the
@@ -312,8 +369,9 @@ class Store {
   }
 
   // Writes dirty tables to disk; originals are copied to dbc/backup/<timestamp>/ first.
+  // MySQL-backed tables are skipped here — they persist via saveToMysql instead.
   save() {
-    const dirty = this.dirtyTables();
+    const dirty = this.dirtyTables().filter((n) => !this.mysqlTables.has(n));
     if (dirty.length === 0) return { saved: [], backupDir: null };
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     const backupDir = path.join(BACKUP_DIR, stamp);

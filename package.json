@@ -9,5 +9,11 @@
   },
   "dependencies": {
     "@wowserhq/stormjs": "^0.4.1"
+  },
+  "optionalDependencies": {
+    "mysql2": "^3.23.1"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }

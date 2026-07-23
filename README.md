@@ -63,9 +63,29 @@ Export…** dialog is the single place for all file operations:
   `DBFilesClient/`.
 - **Custom game files** — every baked model with its correct in-game path, individually or
   as a structure-preserving ZIP.
-- **Client patch MPQ** — one ready-to-ship `patch-3.MPQ`, optionally bundling the DBCs.
+- **Client patch MPQ** — one ready-to-ship archive (named the next winning patch letter),
+  optionally bundling the DBCs. Set `CLIENT_DIR` to your WoW `Data` folder to also get a
+  one-click **Deploy to client** button that writes it straight there.
 - **Import DBC** — replace a project DBC with one edited elsewhere, validated against the
   1.12.1 layout first.
+
+## Pairing with Stoneharry's Spell Editor (vmangos)
+
+If you drive server-side spell data through [Stoneharry's WoW Spell Editor](https://github.com/stoneharry/WoW-Spell-Editor)
+(DBC → MySQL → vmangos), point this suite at the **same MySQL database** so there's no
+DBC-file round-trip and no drop-and-reimport to resync:
+
+```bash
+npm install mysql2   # one-time; optional dependency
+MYSQL_HOST=127.0.0.1 MYSQL_USER=root MYSQL_PASSWORD=... MYSQL_DATABASE=your_db \
+  CLIENT_DIR="C:/Games/WoW 1.12.1/Data" npm start
+```
+
+The suite then reads `Spell`, `SpellVisual`, `SpellVisualKit` and `SpellVisualEffectName`
+from MySQL and saves edits straight back — Stoneharry sees them immediately. It maps columns
+**by ordinal**, so Stoneharry's TBC-style (mislabeled) visual columns are handled correctly
+without any binding changes. Full details, the optional corrected binding files, and a live
+smoke test (`node interop/mysql-smoketest.js`) are in [interop/](interop/README.md).
 
 ## 1.12.1 layout corrections
 

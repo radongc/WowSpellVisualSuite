@@ -1,0 +1,7 @@
+# SpellVisualEffectName.dbc structure for 1.12.1 — corrected vanilla layout
+# from the WoW 1.12.1 Spell Visual Suite (verified against real client bytes).
+int ID
+uint Name string
+uint FileName string
+int AreaEffectSize
+float Scale
