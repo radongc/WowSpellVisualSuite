@@ -67,19 +67,6 @@ Export…** dialog is the single place for all file operations:
 - **Import DBC** — replace a project DBC with one edited elsewhere, validated against the
   1.12.1 layout first.
 
-## 1.12.1 layout corrections
-
-The schemas in [server/schemas.js](server/schemas.js) mostly follow WDBX Editor's
-"Classic 1.12.1 (5875)" definitions, but two tables were corrected against the actual binary
-data (WDBX reuses the TBC layouts, which are wrong for vanilla):
-
-- **SpellVisual** (16 cols): no `StateDoneKit`; vanilla has `HasAreaEffect`, `AreaModel`,
-  `AreaKit`, `AnimEventSoundID` after `MissileSound`.
-- **SpellVisualKit** (35 cols): `KitType` instead of `StartAnimID`/`AnimKitID`, no left/right
-  weapon-effect slots, and **four** char-param float rows after `CharProc[4]`.
-
-All tables round-trip byte-for-byte.
-
 ## Project layout
 
 ```
