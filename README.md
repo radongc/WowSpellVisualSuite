@@ -1,11 +1,10 @@
 # WoW 1.12.1 Spell Visual Suite
 
 A local, browser-based editor for **World of Warcraft 1.12.1 (build 5875)** spell visuals.
-It works directly on the game's DBC files — no database, no build step — and renders the
-actual game models (M2), textures (BLP), particles and skeletal animation straight out of
-your client's MPQ archives, so you can *see* a spell before you ship it.
 
-You supply your own 1.12.1 client; the tool reads it locally. See [Game data](#game-data).
+See [Game data](#game-data).
+
+<img width="2055" height="1225" alt="brave_1FJ2yElhjo" src="https://github.com/user-attachments/assets/bda5b4e4-1ce0-443b-ae3a-0c88d2562e8e" />
 
 ## Features
 
