@@ -72,6 +72,9 @@ button.danger:hover:not(:disabled) { border-color: var(--danger); color: var(--d
 }
 .list-item:hover { background: var(--bg3); }
 .list-item.selected { background: var(--bg3); border-left-color: var(--accent); }
+/* trailing "N visuals" footer — informational, not a row you can click */
+.list-count { cursor: default; justify-content: center; opacity: .7; }
+.list-count:hover { background: none; }
 .list-item .id { font-family: var(--mono); font-size: 11px; color: var(--muted); min-width: 44px; }
 .spell-icon { width: 18px; height: 18px; border-radius: 3px; align-self: center; flex-shrink: 0; }
 .spell-icon-lg { width: 36px; height: 36px; border-radius: 5px; border: 1px solid var(--border); align-self: center; }

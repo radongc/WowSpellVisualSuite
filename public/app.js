@@ -220,10 +220,14 @@ async function renderList(append = false) {
     return;
   }
 
+  // Visuals / kits / effects live entirely in memory (a couple of thousand rows
+  // at most), so render every match rather than capping the list — batched into
+  // a fragment so one reflow covers the whole thing.
   more.hidden = true;
   const def = TAB_DEF[state.tab];
   const ql = q.toLowerCase();
   const isNum = /^\d+$/.test(q);
+  const frag = document.createDocumentFragment();
   let count = 0;
   for (const r of tbl(def.table)) {
     let name = '', sub = '';
@@ -241,9 +245,14 @@ async function renderList(append = false) {
       sub = (r.FileName || '').split('\\').pop();
     }
     if (q && !(isNum && r.ID === Number(q)) && !name.toLowerCase().includes(ql) && !sub.toLowerCase().includes(ql)) continue;
-    list.append(listItem(def.type, r.ID, name, sub));
-    if (++count >= 400) { list.append(el('div', { class: 'list-item' }, el('span', { class: 'sub' }, '… narrow your search to see more'))); break; }
+    frag.append(listItem(def.type, r.ID, name, sub));
+    count++;
   }
+  list.append(frag);
+  list.append(el('div', { class: 'list-item list-count' },
+    el('span', { class: 'sub' }, count
+      ? `${count} ${def.label}${count === 1 ? '' : 's'}${q ? ` matching “${q}”` : ''}`
+      : `no ${def.label}s match “${q}”`)));
 }
 
 function listItem(type, id, name, sub) {
