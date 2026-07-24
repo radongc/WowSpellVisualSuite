@@ -140,17 +140,32 @@ async function loadTable(name) {
 
 function markDirtySoon() { refreshStatus(); }
 
+async function doSave(table, record) {
+  try {
+    await api(`/api/table/${table}/${record.ID}`, { method: 'PUT', body: record });
+    markDirtySoon();
+  } catch (e) {
+    toast(`Failed to apply ${table} #${record.ID}: ${e.message}`, true);
+  }
+}
+
 function scheduleSave(table, record) {
   const key = `${table}:${record.ID}`;
   clearTimeout(state.saveTimers.get(key));
-  state.saveTimers.set(key, setTimeout(async () => {
-    try {
-      await api(`/api/table/${table}/${record.ID}`, { method: 'PUT', body: record });
-      markDirtySoon();
-    } catch (e) {
-      toast(`Failed to apply ${table} #${record.ID}: ${e.message}`, true);
-    }
+  state.saveTimers.set(key, setTimeout(() => {
+    state.saveTimers.delete(key);
+    doSave(table, record);
   }, 250));
+}
+
+// Flush any pending debounced save for this record immediately and await the
+// PUT — use before re-fetching/re-rendering so a fresh GET can't race ahead of
+// the write and read back the stale value.
+async function saveNow(table, record) {
+  const key = `${table}:${record.ID}`;
+  clearTimeout(state.saveTimers.get(key));
+  state.saveTimers.delete(key);
+  await doSave(table, record);
 }
 
 async function refreshStatus() {
@@ -331,11 +346,13 @@ function numField(record, table, field, label, opts = {}) {
       const v = opts.float ? parseFloat(e.target.value) || 0 : Math.trunc(Number(e.target.value)) || 0;
       if (opts.index != null) record[field][opts.index] = v;
       else record[field] = v;
+      if (sub && opts.subtextFn) sub.textContent = opts.subtextFn(v);
       scheduleSave(table, record);
       if (opts.after) opts.after(v);
     },
   });
-  const sub = opts.subtext ? el('div', { class: 'subtext' }, opts.subtext) : null;
+  const sub = (opts.subtextFn || opts.subtext)
+    ? el('div', { class: 'subtext' }, opts.subtextFn ? opts.subtextFn(value) : opts.subtext) : null;
   return el('div', { class: 'fld' + (opts.wide ? ' wide' : '') },
     el('label', {}, label, opts.labelExtra ? ' ' : null, opts.labelExtra || null), input, sub);
 }
@@ -472,8 +489,8 @@ async function renderSpellEditor(content, id) {
     el('div', { class: 'card' },
       el('h3', {}, 'Spell visuals'),
       el('div', { class: 'field-grid' },
-        refField(spell, 'Spell', 'SpellVisualID', 'Visual 1', REFS.visual, { index: 0, after: () => renderEditor() }),
-        refField(spell, 'Spell', 'SpellVisualID', 'Visual 2', REFS.visual, { index: 1, after: () => renderEditor() })),
+        refField(spell, 'Spell', 'SpellVisualID', 'Visual 1', REFS.visual, { index: 0, after: async () => { await saveNow('Spell', spell); renderEditor(); } }),
+        refField(spell, 'Spell', 'SpellVisualID', 'Visual 2', REFS.visual, { index: 1, after: async () => { await saveNow('Spell', spell); renderEditor(); } })),
       spell.SpellVisualID[0] > 0 ? el('div', { style: 'margin-top:8px; display:flex; gap:8px; flex-wrap:wrap' },
         el('button', {
           class: 'primary',
@@ -641,7 +658,7 @@ function renderVisualBody(content, v, compact) {
       selectField(v, 'SpellVisual', 'MissilePathType', 'Path type', Object.entries(PATH_TYPES)),
       selectField(v, 'SpellVisual', 'MissileDestinationAttachment', 'Destination attachment', Object.entries(ATTACH_POINTS)),
       numField(v, 'SpellVisual', 'MissileSound', 'Missile sound', {
-        subtext: soundLabel(v.MissileSound),
+        subtextFn: (val) => soundLabel(val),
         labelExtra: soundPlayButton(v, 'MissileSound'),
       }),
       numField(v, 'SpellVisual', 'MissileAttachment', 'Missile attachment'))));
@@ -654,7 +671,7 @@ function renderVisualBody(content, v, compact) {
       refField(v, 'SpellVisual', 'AreaModel', 'Area model', REFS.effect, { after: (val) => previewEffectId(val) }),
       refField(v, 'SpellVisual', 'AreaKit', 'Area kit (duplicate slot)', REFS.kit),
       numField(v, 'SpellVisual', 'AnimEventSoundID', 'Anim event sound', {
-        subtext: soundLabel(v.AnimEventSoundID),
+        subtextFn: (val) => soundLabel(val),
         labelExtra: soundPlayButton(v, 'AnimEventSoundID'),
       }))));
 }
@@ -687,9 +704,9 @@ function renderKitEditor(content, id) {
     el('h3', {}, 'Animation & sound'),
     el('div', { class: 'field-grid' },
       numField(k, 'SpellVisualKit', 'KitType', 'Kit type'),
-      numField(k, 'SpellVisualKit', 'AnimID', 'Animation', { subtext: animLabel(k.AnimID) }),
+      numField(k, 'SpellVisualKit', 'AnimID', 'Animation', { subtextFn: (v) => animLabel(v) }),
       numField(k, 'SpellVisualKit', 'SoundID', 'Sound', {
-        subtext: soundLabel(k.SoundID),
+        subtextFn: (v) => soundLabel(v),
         labelExtra: soundPlayButton(k, 'SoundID'),
       }),
       shakeField(k))));
