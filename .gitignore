@@ -1,3 +1,4 @@
 gamedata/**
 dbc/**
 node_modules/
+config.json

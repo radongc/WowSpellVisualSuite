@@ -12,16 +12,21 @@ const { buildMpq } = require('./mpqwrite');
 const { buildZip } = require('./zipwrite');
 const mpq = require('./mpq');
 const mysqldb = require('./mysqldb');
+const config = require('./config');
 
-const PORT = Number(process.env.PORT) || 3414;
+// Resolved from config.json (editable in-app via Settings) with env fallback.
+let CFG = config.resolve();
+const PORT = CFG.port;
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 // Drop extracted MPQ contents (Spells\, Creature\, etc.) here to enable 3D previews.
-const GAMEDATA_DIR = process.env.GAMEDATA_DIR || path.join(__dirname, '..', 'gamedata');
-// Optional: path to a WoW client's Data folder, so patch exports can drop straight in.
-const CLIENT_DIR = process.env.CLIENT_DIR || '';
+const GAMEDATA_DIR = CFG.gamedataDir;
+// Path to a WoW client's Data folder, so patch exports can drop straight in.
+// Mutable: the Settings panel can change it without a restart.
+let CLIENT_DIR = CFG.clientDir || '';
 // Tables shared with (and written back to) Stoneharry's MySQL when configured.
 // The three visual tables plus Spell (for its SpellVisual1/2 pointers).
 const MYSQL_TABLES = ['Spell', 'SpellVisual', 'SpellVisualKit', 'SpellVisualEffectName'];
+mysqldb.configure(CFG.mysql);
 
 const store = new Store();
 store.load();
@@ -91,6 +96,82 @@ route('GET', /^\/api\/status$/, (req, res) => {
     mysqlTables: [...store.mysqlTables],
     clientDir: CLIENT_DIR || null,
   });
+});
+
+// Current settings for the Settings panel. The MySQL password is never sent to
+// the client — only whether one is set.
+function publicConfig() {
+  return {
+    mysql: {
+      host: CFG.mysql.host, port: CFG.mysql.port, user: CFG.mysql.user,
+      database: CFG.mysql.database,
+      // shown in the clear in the Settings form (local tool; the value lives in
+      // a gitignored config.json regardless)
+      password: CFG.mysql.password,
+    },
+    clientDir: CFG.clientDir || '',
+    gamedataDir: CFG.gamedataDir,
+    port: CFG.port,
+    configPath: CFG.configPath,
+    backend: store.mysqlTables.size ? 'mysql' : 'file',
+    mysqlTables: [...store.mysqlTables],
+  };
+}
+
+// Effective MySQL config from a settings form: blank password means "keep the
+// stored one" (the UI never receives it, so it can't send it back).
+function effectiveMysql(m = {}) {
+  return {
+    host: m.host || CFG.mysql.host,
+    port: Number(m.port) || CFG.mysql.port,
+    user: m.user || CFG.mysql.user,
+    password: (m.password !== undefined && m.password !== null) ? m.password : CFG.mysql.password,
+    database: (m.database || '').trim(),
+  };
+}
+
+route('GET', /^\/api\/config$/, (req, res) => sendJson(res, 200, publicConfig()));
+
+// Dry-run a connection with the submitted credentials before saving.
+route('POST', /^\/api\/config\/test$/, async (req, res) => {
+  const body = await readBody(req);
+  const cfg = effectiveMysql(body.mysql);
+  if (!cfg.database) return sendJson(res, 200, { ok: false, error: 'No database name given.' });
+  try {
+    const r = await mysqldb.testConnection(cfg, MYSQL_TABLES, SCHEMAS);
+    sendJson(res, 200, r);
+  } catch (e) {
+    sendJson(res, 200, { ok: false, error: e.message });
+  }
+});
+
+// Persist settings to config.json, then apply live: reconnect MySQL and reload
+// the shared tables, and update the client Data folder — no restart needed.
+route('POST', /^\/api\/config$/, async (req, res) => {
+  const body = await readBody(req);
+  const update = {};
+  if (body.mysql) {
+    update.mysql = {};
+    if (body.mysql.host !== undefined) update.mysql.host = String(body.mysql.host).trim();
+    if (body.mysql.user !== undefined) update.mysql.user = String(body.mysql.user).trim();
+    if (body.mysql.database !== undefined) update.mysql.database = String(body.mysql.database).trim();
+    if (body.mysql.port !== undefined) update.mysql.port = Number(body.mysql.port) || 3306;
+    // the form always sends the current password (shown in the clear), so take
+    // it as-is — including empty, which clears it
+    if (body.mysql.password !== undefined && body.mysql.password !== null) {
+      update.mysql.password = String(body.mysql.password);
+    }
+  }
+  if (body.clientDir !== undefined) update.clientDir = String(body.clientDir).trim();
+  try {
+    CFG = config.save(update);
+    CLIENT_DIR = CFG.clientDir || '';
+    mysqldb.configure(CFG.mysql);
+    await reloadMysqlTables();
+    sendJson(res, 200, { ok: true, ...publicConfig() });
+  } catch (e) {
+    sendJson(res, 500, { ok: false, error: e.message });
+  }
 });
 
 route('POST', /^\/api\/(undo|redo)$/, (req, res, m) => {
@@ -718,12 +799,24 @@ async function loadFromMysql() {
   try {
     await mysqldb.connect();
     const loaded = await store.loadFromMysql(mysqldb, MYSQL_TABLES);
-    const cfg = mysqldb.config();
+    const cfg = mysqldb.getConfig();
     console.log(`  MySQL: ${cfg.user}@${cfg.host}:${cfg.port}/${cfg.database} — ` +
       (loaded.length ? `backing ${loaded.join(', ')}` : 'connected, but no matching tables found'));
   } catch (e) {
     console.log(`  !! MySQL disabled: ${e.message}`);
   }
+}
+
+// Reload just the MySQL-backed tables from the database (or clear them back to
+// file/archive if MySQL was turned off). Used after Settings changes.
+async function reloadMysqlTables() {
+  // drop any previously MySQL-sourced tables so they can revert to file/archive
+  for (const name of [...store.mysqlTables]) store.mysqlTables.delete(name);
+  store.tables = {};
+  store.status = {};
+  store.load();
+  loadTablesFromArchives();
+  await loadFromMysql();
 }
 
 async function main() {

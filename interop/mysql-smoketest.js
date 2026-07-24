@@ -2,9 +2,9 @@
 // against a REAL MySQL/MariaDB server, using a throwaway table it creates and
 // drops itself — it never touches your real spellvisual/spell tables.
 //
-// Usage (same env vars as the server):
-//   MYSQL_HOST=127.0.0.1 MYSQL_USER=root MYSQL_PASSWORD=... MYSQL_DATABASE=test \
-//     node interop/mysql-smoketest.js
+// Usage: configure MySQL in the app's Settings panel (or config.json), then:
+//   node interop/mysql-smoketest.js
+// Env vars (MYSQL_HOST/USER/PASSWORD/DATABASE) also work as a fallback.
 //
 // Requires: npm install mysql2
 //
@@ -15,6 +15,7 @@
 
 const path = require('path');
 const mysqldb = require(path.join(__dirname, '..', 'server', 'mysqldb'));
+const appConfig = require(path.join(__dirname, '..', 'server', 'config'));
 const { SCHEMAS } = require(path.join(__dirname, '..', 'server', 'schemas'));
 
 const TABLE = 'zz_svs_smoketest'; // unusual name; created and dropped here only
@@ -30,15 +31,15 @@ let fails = 0;
 const ok = (c, msg) => { console.log((c ? 'ok  ' : 'FAIL') + ' : ' + msg); if (!c) fails++; };
 
 async function main() {
-  if (!mysqldb.isConfigured()) {
-    console.error('Set MYSQL_DATABASE (and host/user/password) first.');
+  const cfg = appConfig.resolve().mysql;
+  if (!cfg.database) {
+    console.error('No MySQL database configured. Set it in the app Settings panel (config.json) or via env vars.');
     process.exit(2);
   }
   let driver;
   try { driver = require('mysql2/promise'); }
   catch (e) { console.error('Run `npm install mysql2` first.'); process.exit(2); }
 
-  const cfg = mysqldb.config();
   const conn = await driver.createConnection(cfg);
   console.log(`connected: ${cfg.user}@${cfg.host}:${cfg.port}/${cfg.database}\n`);
 
@@ -47,9 +48,6 @@ async function main() {
     await conn.query(`CREATE TABLE \`${TABLE}\` (${COLS.map((c) => `\`${c}\` INT`).join(', ')}, PRIMARY KEY (\`ID\`))`);
     await conn.query(`INSERT INTO \`${TABLE}\` (${COLS.map((c) => `\`${c}\``).join(',')}) VALUES (${VANILLA.join(',')})`);
 
-    // Point the module at our throwaway table by temporarily aliasing the schema name.
-    // We call the module's low-level query helpers via a tiny shim: reuse its pool.
-    await mysqldb.connect();
     // Introspect + map exactly as the server would, but against our test table.
     const [dbCols] = await queryCols(conn, cfg.database, TABLE);
     const plan = mysqldb.buildPlan(SCHEMAS.SpellVisual, dbCols, TABLE);
@@ -78,7 +76,6 @@ async function main() {
   } finally {
     await conn.query(`DROP TABLE IF EXISTS \`${TABLE}\``);
     await conn.end();
-    await mysqldb.close();
   }
 
   console.log(fails ? `\n${fails} FAILURE(S)` : '\nALL PASS — live MySQL round-trip works.');

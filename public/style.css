@@ -175,6 +175,8 @@ details.adv > summary { cursor: pointer; color: var(--muted); font-size: 12px; p
   color: var(--accent2); font-weight: 600;
 }
 .dlg-hint { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+.err { color: var(--danger); }
+.ok-text { color: #5ac26a; }
 .dlg-list { max-height: 180px; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); }
 .dlg-row { display: flex; gap: 12px; align-items: baseline; padding: 3px 10px; font-size: 12px; }
 .dlg-row:nth-child(even) { background: var(--bg2); }

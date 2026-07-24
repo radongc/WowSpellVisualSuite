@@ -1783,6 +1783,93 @@ $('#btn-reload').addEventListener('click', async () => {
   } catch (e) { toast('Reload failed: ' + e.message, true); }
 });
 
+// ---------- settings dialog ----------
+
+async function openSettingsDialog() {
+  let cfg;
+  try { cfg = await api('/api/config'); }
+  catch (e) { return toast('Could not load settings: ' + e.message, true); }
+
+  const backdrop = el('div', { class: 'modal-backdrop', onclick: (e) => { if (e.target === backdrop) close(); } });
+  function close() { backdrop.remove(); document.removeEventListener('keydown', onKey); }
+  function onKey(e) { if (e.key === 'Escape') close(); }
+  document.addEventListener('keydown', onKey);
+
+  const field = (label, input, hint) => el('div', { class: 'fld' },
+    el('label', {}, label), input, hint ? el('div', { class: 'subtext' }, hint) : null);
+  const inp = (val, attrs = {}) => el('input', { type: 'text', class: 'mono', value: val == null ? '' : String(val), ...attrs });
+
+  const fHost = inp(cfg.mysql.host);
+  const fPort = inp(cfg.mysql.port, { type: 'number' });
+  const fUser = inp(cfg.mysql.user);
+  // shown in the clear, like Stoneharry — this is a local tool and the value
+  // lives in a gitignored file anyway
+  const fPass = inp(cfg.mysql.password, { placeholder: '(none)' });
+  const fDb = inp(cfg.mysql.database, { placeholder: 'e.g. spelledit — blank = use dbc/ files' });
+  const fClient = inp(cfg.clientDir, { placeholder: 'e.g. C:\\Games\\WoW 1.12.1\\Data' });
+
+  const gather = () => ({
+    mysql: {
+      host: fHost.value.trim(), port: Number(fPort.value) || 3306,
+      user: fUser.value.trim(), database: fDb.value.trim(),
+      password: fPass.value,
+    },
+    clientDir: fClient.value.trim(),
+  });
+
+  const result = el('div', { class: 'subtext', style: 'margin-top:8px; white-space:pre-wrap' });
+  const testBtn = el('button', {
+    onclick: async () => {
+      result.textContent = 'Testing…';
+      try {
+        const r = await api('/api/config/test', { method: 'POST', body: { mysql: gather().mysql } });
+        if (!r.ok) { result.innerHTML = `<span class="err">✗ ${escapeHtml(r.error)}</span>`; return; }
+        const lines = r.tables.map((t) => t.present
+          ? (t.layoutOk ? `✓ ${t.table} (${t.columns} cols)` : `⚠ ${t.table} — ${escapeHtml(t.error)}`)
+          : `✗ ${t.table} not found`);
+        result.innerHTML = '<span class="ok-text">Connected.</span>\n' + lines.map(escapeHtml).join('\n');
+      } catch (e) { result.innerHTML = `<span class="err">✗ ${escapeHtml(e.message)}</span>`; }
+    },
+  }, 'Test connection');
+
+  const saveBtn = el('button', {
+    class: 'primary', style: 'margin-top:12px',
+    onclick: async () => {
+      try {
+        const r = await api('/api/config', { method: 'POST', body: gather() });
+        toast(`Settings saved — backend: ${r.backend}${r.mysqlTables.length ? ` (${r.mysqlTables.join(', ')})` : ''}`);
+        close();
+        await boot(true);
+      } catch (e) { toast('Save failed: ' + e.message, true); }
+    },
+  }, 'Save & Apply');
+
+  const modal = el('div', { class: 'modal dlg' },
+    el('div', { class: 'modal-head' },
+      el('b', {}, '⚙ Settings'), el('span', { class: 'spacer' }),
+      el('button', { onclick: close }, '✕')),
+    el('div', { class: 'dlg-body' },
+      el('div', { class: 'dlg-section' },
+        el('h3', {}, 'Stoneharry MySQL pairing'),
+        el('div', { class: 'sub dlg-hint' },
+          `Point this at Stoneharry's database to share edits with no export/re-import. Leave the database blank to work on dbc/ files instead. Current backend: ${cfg.backend}.`),
+        el('div', { class: 'field-grid' },
+          field('Host', fHost), field('Port', fPort), field('User', fUser),
+          field('Password', fPass), field('Database', fDb, 'blank = file mode')),
+        el('div', { style: 'margin-top:8px' }, testBtn), result),
+      el('div', { class: 'dlg-section' },
+        el('h3', {}, 'WoW client Data folder'),
+        el('div', { class: 'sub dlg-hint' },
+          'Enables the one-click “Deploy to client” button in Save / Export. Leave blank to download patches instead.'),
+        field('Client Data folder', fClient)),
+      el('div', { class: 'dlg-section' },
+        el('div', { class: 'sub' }, `Saved to ${escapeHtml(cfg.configPath)} (gitignored — your password never enters the repo).`),
+        saveBtn)));
+  backdrop.append(modal);
+  document.body.append(backdrop);
+}
+$('#btn-settings').addEventListener('click', openSettingsDialog);
+
 $('#btn-new').addEventListener('click', () => createRecord(false));
 $('#btn-clone').addEventListener('click', () => createRecord(true));
 $('#btn-delete').addEventListener('click', async () => {

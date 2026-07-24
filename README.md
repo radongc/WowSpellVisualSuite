@@ -73,19 +73,23 @@ Export…** dialog is the single place for all file operations:
 
 If you drive server-side spell data through [Stoneharry's WoW Spell Editor](https://github.com/stoneharry/WoW-Spell-Editor)
 (DBC → MySQL → vmangos), point this suite at the **same MySQL database** so there's no
-DBC-file round-trip and no drop-and-reimport to resync:
+DBC-file round-trip and no drop-and-reimport to resync.
 
-```bash
-npm install mysql2   # one-time; optional dependency
-MYSQL_HOST=127.0.0.1 MYSQL_USER=root MYSQL_PASSWORD=... MYSQL_DATABASE=your_db \
-  CLIENT_DIR="C:/Games/WoW 1.12.1/Data" npm start
-```
+Open **⚙ Settings** in the top bar, enter your MySQL connection (the same database Stoneharry
+fills — e.g. `spelledit`) and, optionally, your WoW client's `Data` folder, then **Test
+connection** and **Save**. That's it — settings persist to a gitignored `config.json`, so your
+password never enters the repo and you only do this once. (First time only: `npm install mysql2`.)
 
 The suite then reads `Spell`, `SpellVisual`, `SpellVisualKit` and `SpellVisualEffectName`
 from MySQL and saves edits straight back — Stoneharry sees them immediately. It maps columns
 **by ordinal**, so Stoneharry's TBC-style (mislabeled) visual columns are handled correctly
-without any binding changes. Full details, the optional corrected binding files, and a live
-smoke test (`node interop/mysql-smoketest.js`) are in [interop/](interop/README.md).
+without any binding changes. Setting the client Data folder also adds a one-click **Deploy to
+client** button to the Save / Export dialog.
+
+Full details, the optional corrected binding files, and a live smoke test
+(`node interop/mysql-smoketest.js`) are in [interop/](interop/README.md).
+Prefer env vars or a config file? `config.json` (copy `config.example.json`) and the
+`MYSQL_*` / `CLIENT_DIR` environment variables both work too.
 
 ## 1.12.1 layout corrections
 

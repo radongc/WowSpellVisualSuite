@@ -19,23 +19,20 @@
 const { LOC_LANGS } = require('./dbc');
 const { schemaColumns } = require('./schemas');
 
-// ---- config ----
+// ---- config (injected; see server/config.js) ----
 
-function config() {
-  const database = process.env.MYSQL_DATABASE;
-  if (!database) return null;
-  return {
-    host: process.env.MYSQL_HOST || '127.0.0.1',
-    port: Number(process.env.MYSQL_PORT) || 3306,
-    user: process.env.MYSQL_USER || 'root',
-    password: process.env.MYSQL_PASSWORD || '',
-    database,
-  };
+let _cfg = null; // { host, port, user, password, database } or null when disabled
+
+// Point the module at a database. Enabled only when a database name is given.
+// Re-configuring drops any open pool + cached plans so the next connect() is fresh.
+function configure(mysqlCfg) {
+  _cfg = mysqlCfg && mysqlCfg.database ? { ...mysqlCfg } : null;
+  planCache.clear();
+  if (pool) { try { pool.end(); } catch (e) { /* ignore */ } pool = null; }
 }
 
-function isConfigured() {
-  return config() != null;
-}
+function getConfig() { return _cfg; }
+function isConfigured() { return _cfg != null; }
 
 // ---- pure mapping core (exported for tests; no DB needed) ----
 
@@ -86,6 +83,8 @@ function buildPlan(schema, dbColumns, tableName) {
     sqlName: dbColumns[i].name,
     // a float field stored in an integer column holds reinterpreted bits
     reinterpret: p.type === 'float' && isIntSqlType(dbColumns[i].dataType),
+    // whether the DB column is unsigned (from COLUMN_TYPE, e.g. "int unsigned")
+    sqlUnsigned: /unsigned/i.test(dbColumns[i].columnType || ''),
   }));
 }
 
@@ -99,7 +98,11 @@ function assignInto(rec, col, value) {
 function coerceFromDb(col, raw) {
   if (col.type === 'string') return raw == null ? '' : String(raw);
   if (col.type === 'float') return col.reinterpret ? uintBitsToFloat(Number(raw) || 0) : (Number(raw) || 0);
-  return Math.trunc(Number(raw) || 0); // int / uint
+  const n = Math.trunc(Number(raw) || 0);
+  // Reinterpret the 32-bit value by the schema's signedness. Stoneharry stores
+  // signed fields in unsigned columns, so the -1 "none" sentinel comes back as
+  // 4294967295 — `| 0` maps it back to -1. uint fields keep the full range.
+  return col.type === 'uint' ? (n >>> 0) : (n | 0);
 }
 
 function rowToRecord(plan, row) {
@@ -118,7 +121,10 @@ function readFrom(rec, col) {
 function coerceToDb(col, value) {
   if (col.type === 'string') return value == null ? '' : String(value);
   if (col.type === 'float') return col.reinterpret ? floatToUintBits(value) : (Number(value) || 0);
-  return Math.trunc(Number(value) || 0);
+  const n = Math.trunc(Number(value) || 0);
+  // Match the target column's signedness so -1 lands as 4294967295 in an
+  // unsigned column (what Stoneharry expects) instead of erroring or clamping.
+  return col.sqlUnsigned ? (n >>> 0) : (n | 0);
 }
 
 // Produce a { sqlName: value } object for one record, ready for an upsert.
@@ -145,13 +151,41 @@ function loadDriver() {
 }
 
 async function connect() {
-  const cfg = config();
-  if (!cfg) return false;
+  if (!_cfg) return false;
   const driver = loadDriver();
-  pool = driver.createPool({ ...cfg, connectionLimit: 4, namedPlaceholders: false });
+  pool = driver.createPool({ ..._cfg, connectionLimit: 4, namedPlaceholders: false });
   await pool.query('SELECT 1'); // fail fast on bad credentials
   planCache.clear();
   return true;
+}
+
+// Try a one-off connection with the GIVEN config (not the stored one) and report
+// which of the requested tables exist and whether their layout lines up. Used by
+// the Settings panel's "Test connection" before saving. Never touches the pool.
+async function testConnection(cfg, tableNames, schemas) {
+  const driver = loadDriver();
+  const conn = await driver.createConnection({
+    host: cfg.host, port: cfg.port, user: cfg.user, password: cfg.password, database: cfg.database,
+  });
+  try {
+    const tables = [];
+    for (const name of tableNames) {
+      const [tbls] = await conn.query(
+        'SELECT TABLE_NAME AS t FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? AND LOWER(TABLE_NAME) = LOWER(?)',
+        [cfg.database, name]);
+      if (!tbls.length) { tables.push({ table: name, present: false }); continue; }
+      const [cols] = await conn.query(
+        'SELECT COLUMN_NAME AS name, DATA_TYPE AS dataType, COLUMN_TYPE AS columnType FROM INFORMATION_SCHEMA.COLUMNS ' +
+        'WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION',
+        [cfg.database, tbls[0].t]);
+      let layoutOk = true, error = null;
+      try { buildPlan(schemas[name], cols, name); } catch (e) { layoutOk = false; error = e.message; }
+      tables.push({ table: name, present: true, columns: cols.length, layoutOk, error });
+    }
+    return { ok: true, tables };
+  } finally {
+    await conn.end();
+  }
 }
 
 async function close() {
@@ -163,14 +197,14 @@ async function close() {
 // null if the table is absent / the layout doesn't line up.
 async function resolve(name, schema) {
   if (planCache.has(name)) return planCache.get(name);
-  const cfg = config();
+  const cfg = _cfg;
   const [tbls] = await pool.query(
     'SELECT TABLE_NAME AS t FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? AND LOWER(TABLE_NAME) = LOWER(?)',
     [cfg.database, name]);
   if (!tbls.length) { planCache.set(name, null); return null; }
   const table = tbls[0].t;
   const [cols] = await pool.query(
-    'SELECT COLUMN_NAME AS name, DATA_TYPE AS dataType FROM INFORMATION_SCHEMA.COLUMNS ' +
+    'SELECT COLUMN_NAME AS name, DATA_TYPE AS dataType, COLUMN_TYPE AS columnType FROM INFORMATION_SCHEMA.COLUMNS ' +
     'WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION',
     [cfg.database, table]);
   let entry;
@@ -230,7 +264,8 @@ async function deleteRows(name, schema, ids) {
 }
 
 module.exports = {
-  config, isConfigured, connect, close, hasTable, readTable, upsertRows, deleteRows,
+  configure, getConfig, isConfigured, connect, close, testConnection,
+  hasTable, readTable, upsertRows, deleteRows,
   // exported for tests
   physicalColumns, buildPlan, rowToRecord, recordToRow, uintBitsToFloat, floatToUintBits, isIntSqlType,
 };

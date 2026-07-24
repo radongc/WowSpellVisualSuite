@@ -6,16 +6,16 @@ Two ways to pair this suite with [Stoneharry's WoW Spell Editor](https://github.
 ## 1. Shared MySQL (recommended) — no files, no re-import
 
 Point this suite at the same MySQL database Stoneharry fills, and it becomes the
-single source of truth. Set these before `npm start`:
+single source of truth. Open **⚙ Settings** in the top bar, fill in the MySQL
+connection (host / port / user / password / database), **Test connection**, then
+**Save** — it applies live, no restart. Settings persist to a gitignored
+`config.json`. (One-time: `npm install mysql2` — it's an optional dependency.)
 
-```bash
-MYSQL_HOST=127.0.0.1 MYSQL_PORT=3306 MYSQL_USER=root MYSQL_PASSWORD=... \
-MYSQL_DATABASE=your_stoneharry_db npm start
-```
+Env vars (`MYSQL_HOST` / `MYSQL_PORT` / `MYSQL_USER` / `MYSQL_PASSWORD` /
+`MYSQL_DATABASE`) and editing `config.json` directly (copy `config.example.json`)
+both work too.
 
-(One-time: `npm install mysql2` — it's an optional dependency.)
-
-On boot the suite reads `Spell`, `SpellVisual`, `SpellVisualKit` and
+Once connected, the suite reads `Spell`, `SpellVisual`, `SpellVisualKit` and
 `SpellVisualEffectName` from MySQL instead of `dbc/`. Edits here save straight
 back to those tables, so Stoneharry sees them with no export/re-import.
 
